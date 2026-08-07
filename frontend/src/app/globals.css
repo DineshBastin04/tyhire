@@ -1,0 +1,199 @@
+@import "tailwindcss";
+
+:root {
+  /* Committed to a light theme on purpose: native <select>/<input> controls otherwise
+     silently pick up the OS dark-mode UA stylesheet (dark control bg, dark text) even
+     when our own CSS doesn't ask for it — that's what made text unreadable before. */
+  color-scheme: light;
+
+  --background: #ffffff;
+  --foreground: #111827;
+
+  /* Blue throughout for every button and container tint — kept off the red/purple "AI
+     tool" defaults there. The one deliberate exception is the small severity dots below:
+     a tiny dot (not a box, not a button) is unambiguous enough that conventional
+     green/amber/red reads as a clear severity signal rather than generic styling. */
+  --color-blue-light: #eff6ff;
+  --color-blue-mid: #dbeafe;
+  --color-blue-strong: #bfdbfe;
+  --color-blue: #2563eb;
+  --color-blue-dark: #1e3a8a;
+
+  --color-severity-low: #16a34a;
+  --color-severity-medium: #d97706;
+  --color-severity-high: #dc2626;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Everything below is placed in Tailwind's own layers (base/components) rather than left
+   unlayered. Unlayered CSS always beats layered CSS in the cascade regardless of source
+   order or specificity — so previously, combining e.g. `btn-primary text-xs px-2 py-1` to
+   make a compact button silently ignored the size utilities, since .btn-primary's own
+   padding/font-size were unlayered and always won. Layering these lets Tailwind utilities
+   override them the normal way. */
+
+@layer base {
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  /* Baseline for every native control, so none can fall back to OS dark styling. */
+  input,
+  select,
+  textarea {
+    background: white;
+    color: var(--foreground);
+    border: 1px solid #cbd5e1;
+    border-radius: 0.375rem;
+  }
+
+  /* Range sliders shouldn't get the boxed input treatment above. */
+  input[type="range"] {
+    background: none;
+    border: none;
+    padding: 0;
+  }
+
+  input:focus,
+  select:focus {
+    outline: 2px solid var(--color-blue);
+    outline-offset: -1px;
+  }
+}
+
+@layer components {
+  .input {
+    display: block;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+  }
+
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.375rem;
+    background: var(--color-blue);
+    color: white;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .btn-primary:hover {
+    background: var(--color-blue-dark);
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+  }
+
+  /* Solid blue fill, same as .btn-primary — every button in the app reads as "the same
+     button" now (just sized differently for context: full-size in forms, compact in list
+     rows), rather than outline buttons looking like a lower-emphasis, different style. */
+  .btn-outline {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.375rem;
+    background: var(--color-blue);
+    color: white;
+    border: 1px solid var(--color-blue);
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .btn-outline:hover {
+    background: var(--color-blue-dark);
+    border-color: var(--color-blue-dark);
+  }
+  .btn-outline:disabled {
+    opacity: 0.5;
+  }
+
+  .btn-danger-outline {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.375rem;
+    background: var(--color-blue);
+    color: white;
+    border: 1px solid var(--color-blue);
+    padding: 0.375rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .btn-danger-outline:hover {
+    background: var(--color-blue-dark);
+    border-color: var(--color-blue-dark);
+  }
+  .btn-danger-outline:disabled {
+    opacity: 0.5;
+  }
+
+  /* A status dot + plain text, deliberately with no border/background box at all — every
+     button in this app (including the bordered/outline ones) now has a filled shape with
+     padding, so any boxed pill still reads as "a button" next to them. A dot is
+     unambiguously not clickable, so conventional green/amber/red on just the dot reads as
+     a clear severity signal without reintroducing a red/purple "AI tool" box anywhere. */
+  .badge-approved,
+  .badge-review,
+  .badge-declined {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: none;
+    border: none;
+    padding: 0;
+  }
+  .badge-approved::before,
+  .badge-review::before,
+  .badge-declined::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+    flex-shrink: 0;
+  }
+  .badge-approved {
+    color: var(--color-blue-dark);
+    font-weight: 500;
+  }
+  .badge-approved::before {
+    background: var(--color-severity-low);
+  }
+  .badge-review {
+    color: var(--color-blue-dark);
+    font-weight: 500;
+  }
+  .badge-review::before {
+    background: var(--color-severity-medium);
+  }
+  .badge-declined {
+    color: var(--color-blue-dark);
+    font-weight: 700;
+  }
+  .badge-declined::before {
+    width: 0.625rem;
+    height: 0.625rem;
+    background: var(--color-severity-high);
+  }
+
+  /* Large section/column backgrounds (e.g. the Kanban buckets) — a different job from the
+     inline status dots above, so a separate set of classes: these need an actual tinted
+     background to read as a grouped section, which would look like a giant button if it
+     were one of the small inline badges instead. */
+  .bucket-approved {
+    background: var(--color-blue-light);
+  }
+  .bucket-review {
+    background: var(--color-blue-mid);
+  }
+  .bucket-declined {
+    background: var(--color-blue-strong);
+  }
+}

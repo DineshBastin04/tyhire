@@ -1,0 +1,9 @@
+storage/
+.env
+.env.local
+*.pyc
+__pycache__/
+node_modules/
+.next/
+target/
+Cargo.lock

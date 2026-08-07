@@ -1,0 +1,780 @@
+"use client";
+
+import { useParams } from "next/navigation";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
+import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
+import { createFaceSignalDetector } from "@/lib/faceDetection";
+import type { InterviewSession, SignalType } from "@/lib/types";
+
+type Stage =
+  | "loading"
+  | "error"
+  | "consent"
+  | "identity"
+  | "screenshare"
+  | "starting"
+  | "interview"
+  | "completed";
+
+const VIRTUAL_CAMERA_HINTS = ["obs", "virtual", "manycam", "snap camera", "droidcam"];
+
+function tokenHeader(session: InterviewSession): Record<string, string> {
+  return { "X-Interview-Token": session.join_token };
+}
+
+function cameraErrorMessage(err: unknown): string {
+  const name = err instanceof DOMException ? err.name : "";
+  if (name === "NotAllowedError") {
+    return (
+      "Camera/microphone access was blocked. This can be the browser's own permission " +
+      "prompt, or your computer's system-level privacy settings blocking it entirely " +
+      "(Windows: Settings > Privacy & security > Camera / Microphone; macOS: System " +
+      "Settings > Privacy & Security). Fix that, then reload this page."
+    );
+  }
+  if (name === "NotFoundError") {
+    return "No camera was found on this device. A working camera is required for this step.";
+  }
+  return "Couldn't access your camera/microphone. Please check your permissions and try again.";
+}
+
+export default function InterviewJoinPage() {
+  const { token } = useParams<{ token: string }>();
+  const [stage, setStage] = useState<Stage>("loading");
+  const [session, setSession] = useState<InterviewSession | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [finishHadError, setFinishHadError] = useState(false);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const startRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    getJson<InterviewSession>(`/interviews/join/${token}`)
+      .then((s) => {
+        setSession(s);
+        // This link has already been used to completion — the backend also rejects any
+        // further mutating calls on a completed session, but jumping straight to the
+        // terminal screen here avoids walking through consent/identity/etc. only to hit
+        // an error partway through.
+        setStage(s.status === "completed" ? "completed" : "consent");
+      })
+      .catch(() => setError("This interview link is invalid or has expired."));
+  }, [token]);
+
+  if (error) return <Centered>{error}</Centered>;
+  if (stage === "loading" || !session) return <Centered>Loading…</Centered>;
+  if (stage === "consent")
+    return <ConsentScreen onAccept={() => setStage("identity")} />;
+  if (stage === "identity")
+    return <IdentityCheck session={session} onDone={() => setStage("screenshare")} />;
+  if (stage === "screenshare")
+    return (
+      <ScreenShareGate
+        session={session}
+        screenStreamRef={screenStreamRef}
+        startRef={startRef}
+        onDone={() => setStage("starting")}
+      />
+    );
+  if (stage === "starting")
+    return (
+      <StartGate
+        session={session}
+        onReady={() => {
+          startRef.current = Date.now();
+          setStage("interview");
+        }}
+      />
+    );
+  if (stage === "interview")
+    return (
+      <InterviewRecorder
+        session={session}
+        screenStreamRef={screenStreamRef}
+        startRef={startRef}
+        onDone={(hadError) => {
+          setFinishHadError(hadError);
+          setStage("completed");
+        }}
+      />
+    );
+  return <CompletedScreen hadError={finishHadError} />;
+}
+
+function CompletedScreen({ hadError }: { hadError: boolean }) {
+  function handleClose() {
+    // Best-effort — script-initiated tab close only works for tabs opened by script, which
+    // this one wasn't (it's a normal navigated-to link), so most browsers will silently
+    // ignore this. The teardown that actually matters (camera/mic/screen-share) already
+    // happened before this screen ever rendered, in InterviewRecorder.finish().
+    window.close();
+  }
+
+  return (
+    <Centered>
+      <div className="space-y-3">
+        <p>
+          {hadError
+            ? "Your interview recording was submitted, but we hit a problem confirming it " +
+              "was fully received. Your camera, microphone, and screen sharing have already " +
+              "been turned off — if you're concerned, please contact HR to confirm."
+            : "Thanks — your interview has been submitted for review. Your camera, " +
+              "microphone, and screen sharing have been turned off."}
+        </p>
+        <button onClick={handleClose} className="btn-outline">
+          Close
+        </button>
+      </div>
+    </Centered>
+  );
+}
+
+function Centered({ children }: { children: React.ReactNode }) {
+  // A <div>, not a <p> — CompletedScreen passes a <div> (containing its own <p> and a
+  // <button>) as children, and <p> can't legally contain block-level elements like that
+  // (the browser was silently un-nesting it, which is what triggered the hydration errors).
+  return (
+    <div className="flex flex-1 items-center justify-center px-6">
+      <div className="max-w-md text-center text-zinc-600">{children}</div>
+    </div>
+  );
+}
+
+function ConsentScreen({ onAccept }: { onAccept: () => void }) {
+  return (
+    <div className="flex flex-1 items-center justify-center px-6">
+      <div className="max-w-md space-y-4">
+        <h1 className="text-lg font-semibold">Before you begin</h1>
+        <p className="text-sm text-zinc-600">
+          This interview is recorded and monitored for integrity. We check your identity
+          against a government ID, ask you to share your screen, and monitor for tab
+          switching, copy/paste, fullscreen exits, and other signals during the session,
+          including face/gaze tracking run locally in your browser to detect if you're
+          reading from another screen. Your recording is also transcribed, and we analyze
+          the content of your answers, your vocal tone (pacing, hesitation, energy), and
+          your visible facial expression/body language as supplementary signals for the
+          reviewer — not as an automated pass/fail judgment. Nothing here auto-rejects you —
+          every flag is reviewed by a person before any decision is made. You can withdraw
+          consent by closing this window before starting.
+        </p>
+        <button onClick={onAccept} className="btn-primary">
+          I understand, continue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function IdentityCheck({
+  session,
+  onDone,
+}: {
+  session: InterviewSession;
+  onDone: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [idFile, setIdFile] = useState<File | null>(null);
+  const [selfieBlob, setSelfieBlob] = useState<Blob | null>(null);
+  const [livenessPassed, setLivenessPassed] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [prompt, setPrompt] = useState<"blink" | "turn_head">("turn_head");
+  const [status, setStatus] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  useEffect(() => {
+    navigator.mediaDevices
+      .getUserMedia({ video: true })
+      .then((stream) => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      })
+      .catch((err) => setCameraError(cameraErrorMessage(err)));
+  }, []);
+
+  function grabFrame(): { blob: Promise<Blob | null>; canvas: HTMLCanvasElement } {
+    const video = videoRef.current!;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d")!.drawImage(video, 0, 0);
+    return { blob: new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg")), canvas };
+  }
+
+  async function captureLivenessAndSelfie() {
+    setStatus(`Capturing — please ${prompt === "blink" ? "blink" : "turn your head"} now…`);
+    const first = grabFrame();
+    await new Promise((r) => setTimeout(r, 1500));
+    const second = grabFrame();
+
+    const diff = frameDifference(first.canvas, second.canvas);
+    setLivenessPassed(diff > 0.02); // real pixel-motion heuristic, not a hardcoded pass
+
+    const selfieBlobResult = await second.blob;
+    setSelfieBlob(selfieBlobResult);
+    setStatus(diff > 0.02 ? "Motion detected — liveness OK." : "No motion detected — try again.");
+  }
+
+  async function submit() {
+    if (!idFile || !selfieBlob) return;
+    setChecking(true);
+    setSubmitError(null);
+    try {
+      let idBlob: Blob;
+      try {
+        idBlob = await normalizeToJpeg(idFile);
+      } catch {
+        throw new Error(
+          "Couldn't read that ID photo. Please upload a JPG or PNG image (not HEIC/PDF)."
+        );
+      }
+
+      const form = new FormData();
+      form.append("id_document", idBlob, "id.jpg");
+      form.append("selfie", selfieBlob, "selfie.jpg");
+      form.append("liveness_prompt", prompt);
+      form.append("liveness_passed", String(livenessPassed));
+      await postForm(`/interviews/${session.id}/identity-check`, form, tokenHeader(session));
+      onDone();
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong submitting your identity check. Please try again."
+      );
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-1 items-center justify-center px-6 py-8">
+      <div className="max-w-md w-full space-y-4">
+        <h1 className="text-lg font-semibold">Identity check</h1>
+
+        <div>
+          <label className="block text-sm font-medium mb-1">Upload a photo of your government ID</label>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setIdFile(e.target.files?.[0] ?? null)}
+          />
+        </div>
+
+        {cameraError && <p className="text-sm text-red-600">{cameraError}</p>}
+
+        <video ref={videoRef} autoPlay muted playsInline className="w-full rounded-md bg-black" />
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={captureLivenessAndSelfie}
+            disabled={!!cameraError}
+            className="btn-outline disabled:opacity-40"
+          >
+            Turn your head and click here
+          </button>
+          {status && <span className="text-xs text-zinc-500">{status}</span>}
+        </div>
+
+        {submitError && <p className="text-sm text-red-600">{submitError}</p>}
+
+        <button
+          onClick={submit}
+          disabled={!idFile || !selfieBlob || checking}
+          className="btn-primary"
+        >
+          {checking ? "Verifying…" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * OpenAI's vision API only accepts png/jpeg/gif/webp — phone camera photos are often HEIC,
+ * which it rejects outright. Re-encoding through a canvas normalizes whatever the browser
+ * can decode (jpeg, png, webp, gif, bmp, and HEIC on browsers/OSes with that codec) to a
+ * plain JPEG before upload, instead of passing the original file straight through.
+ */
+async function normalizeToJpeg(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("Could not encode image"))),
+      "image/jpeg",
+      0.92
+    );
+  });
+}
+
+function frameDifference(a: HTMLCanvasElement, b: HTMLCanvasElement): number {
+  const w = 32, h = 32;
+  const ctxA = document.createElement("canvas");
+  const ctxB = document.createElement("canvas");
+  ctxA.width = ctxB.width = w;
+  ctxA.height = ctxB.height = h;
+  ctxA.getContext("2d")!.drawImage(a, 0, 0, w, h);
+  ctxB.getContext("2d")!.drawImage(b, 0, 0, w, h);
+  const dataA = ctxA.getContext("2d")!.getImageData(0, 0, w, h).data;
+  const dataB = ctxB.getContext("2d")!.getImageData(0, 0, w, h).data;
+  let diff = 0;
+  for (let i = 0; i < dataA.length; i += 4) {
+    diff += Math.abs(dataA[i] - dataB[i]);
+  }
+  return diff / (w * h * 255);
+}
+
+function sendSignal(session: InterviewSession, signal_type: SignalType, session_offset_ms: number, meta: Record<string, unknown> = {}) {
+  postJson(`/interviews/${session.id}/signals`, [{ signal_type, session_offset_ms, meta }], tokenHeader(session)).catch(() => {
+    // Best-effort — a dropped one-off signal isn't worth retry/queue complexity here.
+  });
+}
+
+function ScreenShareGate({
+  session,
+  screenStreamRef,
+  startRef,
+  onDone,
+}: {
+  session: InterviewSession;
+  screenStreamRef: RefObject<MediaStream | null>;
+  startRef: RefObject<number>;
+  onDone: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [requesting, setRequesting] = useState(false);
+
+  async function requestShare() {
+    setRequesting(true);
+    setError(null);
+    // Fired in the same click as getDisplayMedia below so it still counts as a user
+    // gesture — awaiting first can lose that context in some browsers.
+    document.documentElement.requestFullscreen?.().catch(() => {});
+
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStreamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      const settings = track.getSettings() as MediaTrackSettings & { displaySurface?: string };
+
+      if (settings.displaySurface && settings.displaySurface !== "monitor") {
+        sendSignal(session, "screen_share_partial", 0, { displaySurface: settings.displaySurface });
+      }
+
+      track.onended = () => {
+        sendSignal(session, "screen_share_stopped", Date.now() - startRef.current);
+      };
+
+      onDone();
+    } catch (err) {
+      setError(
+        err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Screen sharing was declined or blocked. This is required to continue — please allow it and try again."
+          : "Couldn't start screen sharing. Please try again."
+      );
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-1 items-center justify-center px-6 py-8">
+      <div className="max-w-md w-full space-y-4 text-center">
+        <h1 className="text-lg font-semibold">Share your screen</h1>
+        <p className="text-sm text-zinc-600">
+          Before continuing, please share your screen. Sharing your entire screen is
+          preferred — if you share only a single tab or window instead, that's noted for
+          the reviewer, not blocked.
+        </p>
+        {error && <p className="text-sm text-red-600">{error}</p>}
+        <button onClick={requestShare} disabled={requesting} className="btn-primary">
+          {requesting ? "Waiting for permission…" : "Share your screen"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function StartGate({ session, onReady }: { session: InterviewSession; onReady: () => void }) {
+  const [status, setStatus] = useState<"checking" | "waiting_probe" | "identity_blocked" | "error">(
+    "checking"
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    async function attempt() {
+      try {
+        await postJson(`/interviews/${session.id}/start`, {}, tokenHeader(session));
+        if (!cancelled) onReady();
+      } catch (err) {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("Desktop monitor")) {
+          setStatus("waiting_probe");
+          timer = setTimeout(attempt, 4000);
+        } else if (msg.includes("Identity verification")) {
+          setStatus("identity_blocked");
+        } else {
+          setStatus("error");
+        }
+      }
+    }
+
+    attempt();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
+
+  if (status === "waiting_probe") {
+    return (
+      <Centered>
+        <span className="block space-y-3">
+          <span className="block font-medium">Waiting for the desktop monitor…</span>
+          <span className="block text-sm">
+            This role requires the background-app monitor to be running before the interview
+            can start. Download and run it, then this page continues automatically:
+          </span>
+          <code className="block bg-zinc-100 rounded p-2 text-xs">
+            node probe.js --session-id {session.id}
+          </code>
+        </span>
+      </Centered>
+    );
+  }
+
+  if (status === "identity_blocked") {
+    return (
+      <Centered>
+        Identity verification didn&apos;t match. Please contact HR before continuing — do not
+        close this window until you&apos;ve been in touch with them.
+      </Centered>
+    );
+  }
+
+  if (status === "error") {
+    return <Centered>Could not start the interview. Please refresh and try again.</Centered>;
+  }
+
+  return <Centered>Checking…</Centered>;
+}
+
+function InterviewRecorder({
+  session,
+  screenStreamRef,
+  startRef,
+  onDone,
+}: {
+  session: InterviewSession;
+  screenStreamRef: RefObject<MediaStream | null>;
+  startRef: RefObject<number>;
+  onDone: (hadError: boolean) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const webrtcApiRef = useRef<WebRTCApi | null>(null);
+  const pendingSignals = useRef<{ signal_type: SignalType; session_offset_ms: number }[]>([]);
+  const [finishing, setFinishing] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [recordingStarted, setRecordingStarted] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [cameraOff, setCameraOff] = useState(false);
+  const [muteRequested, setMuteRequested] = useState(false);
+
+  function toggleMic() {
+    setMicMuted(webrtcApiRef.current?.toggleMic() ?? false);
+    setMuteRequested(false);
+  }
+  function toggleCamera() {
+    setCameraOff(webrtcApiRef.current?.toggleCamera() ?? false);
+  }
+
+  function pushSignal(signal_type: SignalType) {
+    pendingSignals.current.push({
+      signal_type,
+      session_offset_ms: Date.now() - startRef.current,
+    });
+  }
+
+  useEffect(() => {
+    const onVisibility = () => document.hidden && pushSignal("tab_switch");
+    const onBlur = () => pushSignal("window_blur");
+    const onCopy = () => pushSignal("copy_paste");
+    const onPaste = () => pushSignal("copy_paste");
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("paste", onPaste);
+
+    // Only flags an EXIT after having actually been in fullscreen — never flags simply
+    // "never entered fullscreen" (requestFullscreen in the previous step is best-effort).
+    let wasFullscreen = !!document.fullscreenElement;
+    const onFullscreenChange = () => {
+      if (document.fullscreenElement) {
+        wasFullscreen = true;
+      } else if (wasFullscreen) {
+        pushSignal("fullscreen_exit");
+        wasFullscreen = false;
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+
+    // DevTools heuristic: a docked panel shrinks the viewport relative to the outer window.
+    // Explicitly unreliable (the user's own window sizing can trigger it) — kept as a
+    // low-signal-alone input to fusion rather than trusted standalone.
+    const devtoolsInterval = setInterval(() => {
+      const widthDiff = window.outerWidth - window.innerWidth;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      if (widthDiff > 160 || heightDiff > 160) pushSignal("devtools_open");
+    }, 4000);
+
+    // window.screen.isExtended: a lighter, permission-free complement to the
+    // getScreenDetails() check below — narrower browser support, but no prompt needed.
+    const screenWithExtended = window.screen as Screen & { isExtended?: boolean };
+    if (screenWithExtended.isExtended) pushSignal("external_display_detected");
+
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((devices) => {
+        const suspicious = devices.some((d) =>
+          VIRTUAL_CAMERA_HINTS.some((hint) => d.label.toLowerCase().includes(hint))
+        );
+        if (suspicious) pushSignal("virtual_camera");
+      })
+      .catch(() => {
+        // Best-effort signal — not worth surfacing a failure to the candidate for this one.
+      });
+
+    // Window Management API (Chromium): genuinely detects connected displays from the
+    // browser with just a permission prompt — no native install needed. Unsupported
+    // browsers (Firefox/Safari as of writing) just skip this, since it's feature-detected.
+    const screenAwareWindow = window as unknown as {
+      getScreenDetails?: () => Promise<{
+        screens: unknown[];
+        addEventListener: (type: "screenschange", listener: () => void) => void;
+      }>;
+    };
+    if (typeof screenAwareWindow.getScreenDetails === "function") {
+      screenAwareWindow
+        .getScreenDetails()
+        .then((details) => {
+          const checkDisplays = () => {
+            if (details.screens.length > 1) pushSignal("external_display_detected");
+          };
+          checkDisplays();
+          details.addEventListener("screenschange", checkDisplays);
+        })
+        .catch(() => {
+          // Permission denied, or not actually supported at runtime — not a hard requirement.
+        });
+    }
+
+    let stream: MediaStream;
+    let faceInterval: ReturnType<typeof setInterval> | undefined;
+    let sentimentInterval: ReturnType<typeof setInterval> | undefined;
+    const detectFace = createFaceSignalDetector();
+    // Consecutive-hit counters so a single bad frame (blink, brief head turn) doesn't flag —
+    // only sustained conditions do, matching the roadmap's "never an alarm on its own" rule.
+    let gazeAwayStreak = 0;
+    let secondFaceStreak = 0;
+
+    navigator.mediaDevices
+      .getUserMedia({ video: true, audio: true })
+      .then((s) => {
+        stream = s;
+        streamRef.current = s;
+        if (videoRef.current) videoRef.current.srcObject = s;
+
+        const recorder = new MediaRecorder(s, { mimeType: "video/webm" });
+        recorder.ondataavailable = async (e) => {
+          if (e.data.size === 0) return;
+          const form = new FormData();
+          form.append("chunk", e.data, "chunk.webm");
+          // Best-effort, same as the other periodic uploads below — a single dropped chunk
+          // isn't worth retry complexity, and once a session is already completed (e.g. a
+          // stale duplicate tab left open from an earlier run) this would otherwise throw
+          // an unhandled rejection every 5s forever.
+          await postForm(`/interviews/${session.id}/recording-chunk`, form, tokenHeader(session)).catch(
+            () => {}
+          );
+        };
+        recorder.start(5000);
+        recorderRef.current = recorder;
+        setRecordingStarted(true);
+
+        // Periodic, independent, fully-closed clips for "live" sentiment — deliberately a
+        // SEPARATE short recorder rather than slicing the continuously-appended recording
+        // above, which isn't safe to read with ffmpeg mid-write server-side. 60s cadence
+        // balances the interviewer seeing something current against per-clip OpenAI cost.
+        const takeSentimentSample = () => {
+          const sampleChunks: BlobPart[] = [];
+          const sampleRecorder = new MediaRecorder(s, { mimeType: "video/webm" });
+          sampleRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) sampleChunks.push(e.data);
+          };
+          sampleRecorder.onstop = async () => {
+            const blob = new Blob(sampleChunks, { type: "video/webm" });
+            const form = new FormData();
+            form.append("clip", blob, "sample.webm");
+            form.append("session_offset_ms", String(Date.now() - startRef.current));
+            await postForm(`/interviews/${session.id}/sentiment-sample`, form, tokenHeader(session)).catch(
+              () => {}
+            );
+          };
+          sampleRecorder.start();
+          setTimeout(() => sampleRecorder.stop(), 4000);
+        };
+        takeSentimentSample();
+        sentimentInterval = setInterval(takeSentimentSample, 60000);
+
+        // Runs client-side only (MediaPipe WASM) — raw video never leaves the browser for
+        // this; only the derived signal (e.g. "gaze off-screen") gets sent to the backend.
+        faceInterval = setInterval(async () => {
+          if (!videoRef.current) return;
+          const result = await detectFace(videoRef.current);
+          if (!result) return;
+
+          if (result.faceCount > 1) {
+            secondFaceStreak++;
+            if (secondFaceStreak >= 2) pushSignal("second_face");
+          } else {
+            secondFaceStreak = 0;
+          }
+
+          if (result.gazeOffScreen) {
+            gazeAwayStreak++;
+            if (gazeAwayStreak >= 3) pushSignal("gaze_off_screen");
+          } else {
+            gazeAwayStreak = 0;
+          }
+
+          if (result.excessiveMotion) pushSignal("excessive_motion");
+        }, 800);
+      })
+      .catch((err) => setCameraError(cameraErrorMessage(err)));
+
+    const flushInterval = setInterval(() => {
+      if (pendingSignals.current.length === 0) return;
+      const batch = pendingSignals.current;
+      pendingSignals.current = [];
+      postJson(`/interviews/${session.id}/signals`, batch, tokenHeader(session)).catch((err) => {
+        // A 409 means the session is already completed (e.g. a stale duplicate tab left
+        // open from an earlier run) — retrying forever every 3s is pointless, so this one
+        // case gives up instead of re-queuing. Any other failure (network blip) still
+        // re-queues for the next tick, same as before.
+        if (err instanceof Error && err.message.includes("409")) return;
+        pendingSignals.current.unshift(...batch);
+      });
+    }, 3000);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("paste", onPaste);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      clearInterval(devtoolsInterval);
+      clearInterval(flushInterval);
+      clearInterval(faceInterval);
+      clearInterval(sentimentInterval);
+      stream?.getTracks().forEach((t) => t.stop());
+    };
+  }, [session.id, startRef]);
+
+  async function finish() {
+    setFinishing(true);
+
+    // Everything media-related stops here, unconditionally, before any network call — a
+    // failed request below must never leave the candidate's camera/mic/screen-share
+    // running. (The live call's own camera/mic releases separately, via WebRTCRoom's own
+    // unmount cleanup once onDone() below causes the parent to stop rendering this stage —
+    // guaranteed by the finally, not left contingent on the network calls succeeding.)
+    recorderRef.current?.stop();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+
+    let hadError = false;
+    try {
+      await postJson(`/interviews/${session.id}/signals`, pendingSignals.current, tokenHeader(session));
+      pendingSignals.current = [];
+      const res = await fetch(`${BASE_URL}/interviews/${session.id}/complete`, {
+        method: "POST",
+        credentials: "include",
+        headers: tokenHeader(session),
+      });
+      if (!res.ok) throw new Error(`complete failed: ${res.status}`);
+    } catch {
+      hadError = true;
+    } finally {
+      onDone(hadError);
+    }
+  }
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center px-6 py-8 gap-4">
+      {cameraError ? (
+        <p className="max-w-md text-sm text-red-600 text-center">{cameraError}</p>
+      ) : (
+        <p className="text-sm text-zinc-500">
+          Live call below — stay on this tab and answer the questions you're asked.
+        </p>
+      )}
+      <div className="w-full max-w-2xl h-[420px]">
+        <WebRTCRoom
+          sessionId={session.id}
+          token={session.join_token}
+          role="candidate"
+          iceServers={session.ice_servers}
+          extraVideoTrack={screenStreamRef.current?.getVideoTracks()[0] ?? null}
+          onApiReady={(api) => {
+            webrtcApiRef.current = api;
+          }}
+          onMuteRequested={() => setMuteRequested(true)}
+        />
+      </div>
+      {muteRequested && (
+        <p className="text-xs text-zinc-600">
+          The interviewer asked you to mute your mic.{" "}
+          <button onClick={toggleMic} className="underline">
+            Mute now
+          </button>
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button onClick={toggleMic} className="btn-outline text-xs px-2 py-1">
+          {micMuted ? "Unmute mic" : "Mute mic"}
+        </button>
+        <button onClick={toggleCamera} className="btn-outline text-xs px-2 py-1">
+          {cameraOff ? "Turn camera on" : "Turn camera off"}
+        </button>
+      </div>
+      {/* Not display:none deliberately — some browsers stop maintaining a live decoded
+          frame for fully un-rendered video elements, which breaks the canvas/WASM-based
+          face detection reading from it. Kept tiny and invisible instead of hidden. */}
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
+        className="absolute w-px h-px opacity-0 pointer-events-none -z-10"
+      />
+      {recordingStarted ? (
+        <button onClick={finish} disabled={finishing} className="btn-primary">
+          {finishing ? "Submitting…" : "Finish interview"}
+        </button>
+      ) : (
+        !cameraError && <p className="text-xs text-zinc-400">Starting…</p>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"frontend http %{http_code}\\\\n\" http://localhost:3000/jobs --max-time 5)"
+    ]
+  }
+}

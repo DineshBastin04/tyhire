@@ -1,0 +1,71 @@
+services:
+  # --- coturn: TURN fallback relay for the custom WebRTC call ---------------------------
+  # Not a media server and not per-call — one shared instance. Only carries media for the
+  # minority of connections that can't establish a direct browser-to-browser path (strict
+  # corporate firewalls, some mobile carriers); every other call goes fully peer-to-peer
+  # and never touches this container. See backend/app/services/video_provider.py.
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    command: >
+      -n
+      --listening-port=3478
+      --realm=${TURN_DOMAIN:-localhost}
+      --use-auth-secret
+      --static-auth-secret=${TURN_SECRET:-dev-turn-secret-change-me}
+      --no-cli
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "49160-49200:49160-49200/udp"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hr_tool
+      POSTGRES_PASSWORD: hr_tool
+      POSTGRES_DB: hr_tool
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - coturn
+    environment:
+      DATABASE_URL: postgresql://hr_tool:hr_tool@postgres:5432/hr_tool
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
+      STORAGE_ENCRYPTION_KEY: ${STORAGE_ENCRYPTION_KEY:-}
+      IDENTITY_MEDIA_RETENTION_DAYS: ${IDENTITY_MEDIA_RETENTION_DAYS:-90}
+      STORAGE_ROOT: /storage
+      CORS_ORIGINS: '["http://localhost:3000"]'
+      # Must match the coturn service's own TURN_SECRET above exactly — this is what lets
+      # our backend mint short-lived TURN credentials coturn will accept.
+      TURN_DOMAIN: ${TURN_DOMAIN:-localhost}
+      TURN_SECRET: ${TURN_SECRET:-dev-turn-secret-change-me}
+      # Phase 4 — blank until you create these yourself (Google Cloud OAuth client /
+      # Microsoft Entra app registration); sign-in buttons simply won't work until set.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:8000/api/v1}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./storage:/storage
+
+volumes:
+  pgdata:
