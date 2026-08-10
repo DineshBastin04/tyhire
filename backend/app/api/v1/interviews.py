@@ -2,7 +2,7 @@ import contextlib
 import os
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -46,6 +46,7 @@ from app.schemas.interview import (
     StartSessionResponse,
 )
 from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
+from app.services.retention import purge_expired_identity_media
 from app.services.audio_extract import extract_audio_wav
 from app.services.facial_analysis import analyze_facial_affect
 from app.services.identity_check import check_identity_match
@@ -175,32 +176,12 @@ def get_interviewer_recording(session_id: uuid.UUID, db: Session = Depends(get_d
 
 @router.post("/cleanup-expired-media", dependencies=[Depends(require_hr_auth)])
 def cleanup_expired_media(db: Session = Depends(get_db)):
-    """Deletes raw ID/selfie image files past the retention window, keeping the verdict/
-    confidence for audit purposes — not the images themselves. No scheduler exists in this
-    POC, so this is HR-triggered rather than automatic; wire it to a cron job for real use."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.identity_media_retention_days)
-    expired = (
-        db.query(IdentityCheck)
-        .filter(IdentityCheck.created_at < cutoff, IdentityCheck.id_document_path.isnot(None))
-        .all()
-    )
-
-    deleted = 0
-    for check in expired:
-        for path in (check.id_document_path, check.selfie_path):
-            if not path:
-                continue
-            try:
-                os.remove(storage.absolute_path(path))
-            except OSError:
-                pass
-        check.id_document_path = None
-        check.selfie_path = None
-        db.add(check)
-        deleted += 1
-
-    db.commit()
-    return {"identity_checks_cleaned": deleted}
+    """Manually clears raw ID/selfie image files past the retention window, keeping the
+    verdict/confidence for audit purposes — not the images themselves. Retention is also
+    enforced automatically by the in-process daily sweep (see app.main) and can be driven by
+    external cron (python -m app.jobs.run_retention_sweep); all three share the same logic."""
+    cleared = purge_expired_identity_media(db)
+    return {"identity_checks_cleaned": cleared}
 
 
 @router.get(
