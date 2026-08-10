@@ -417,6 +417,15 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
   const [status, setStatus] = useState<"checking" | "waiting_probe" | "identity_blocked" | "error">(
     "checking"
   );
+  // Bumped by the manual retry button to re-run the start attempt in place — needed because a
+  // hard identity block (or a generic error) is otherwise a dead end: once HR clears the
+  // no_match there's no way forward short of a full page reload, which isn't discoverable.
+  const [retryKey, setRetryKey] = useState(0);
+
+  function retry() {
+    setStatus("checking");
+    setRetryKey((k) => k + 1);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -446,7 +455,7 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id]);
+  }, [session.id, retryKey]);
 
   if (status === "waiting_probe") {
     return (
@@ -468,14 +477,30 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
   if (status === "identity_blocked") {
     return (
       <Centered>
-        Identity verification didn&apos;t match. Please contact HR before continuing — do not
-        close this window until you&apos;ve been in touch with them.
+        <span className="block space-y-3">
+          <span className="block">
+            Identity verification didn&apos;t match. Please contact HR before continuing — do
+            not close this window until you&apos;ve been in touch with them.
+          </span>
+          <button onClick={retry} className="btn-primary">
+            I&apos;ve spoken to HR — try again
+          </button>
+        </span>
       </Centered>
     );
   }
 
   if (status === "error") {
-    return <Centered>Could not start the interview. Please refresh and try again.</Centered>;
+    return (
+      <Centered>
+        <span className="block space-y-3">
+          <span className="block">Could not start the interview.</span>
+          <button onClick={retry} className="btn-primary">
+            Try again
+          </button>
+        </span>
+      </Centered>
+    );
   }
 
   return <Centered>Checking…</Centered>;
