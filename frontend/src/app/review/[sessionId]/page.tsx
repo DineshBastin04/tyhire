@@ -18,30 +18,20 @@ export default function ReviewDetailPage() {
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [flags, setFlags] = useState<IntegrityFlag[]>([]);
   const [identityCheck, setIdentityCheck] = useState<IdentityCheck | null>(null);
-  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
 
-  // Fetched (not a plain <video src>) so the HR session cookie is reliably sent and the
-  // recording — possibly encrypted at rest — goes through the authenticated, decrypting
-  // /media/recording route rather than the old unauthenticated static file mount.
-  useEffect(() => {
-    if (!session?.recording_file_path) {
-      setRecordingUrl(null);
-      return;
-    }
-    let objectUrl: string | null = null;
-    fetch(`${BASE_URL}/interviews/${sessionId}/media/recording`, { credentials: "include" })
-      .then((res) => (res.ok ? res.blob() : null))
-      .then((blob) => {
-        if (blob) {
-          objectUrl = URL.createObjectURL(blob);
-          setRecordingUrl(objectUrl);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [session?.recording_file_path, sessionId]);
+  // A direct <video src>, not a fetched Blob — the backend now streams this route with
+  // Range support (StreamingResponse, 206 partial content), which only pays off if the
+  // browser can issue its own Range requests as it seeks/buffers. Pre-fetching the whole
+  // recording into a Blob first (the old approach) defeated that: the entire file had to
+  // download before playback could even start, on every recording regardless of length.
+  // The HR session cookie still reaches this cross-port request because it's SameSite=lax
+  // and localhost:3000/localhost:8000 are the same *site* (SameSite ignores port) even
+  // though they're different origins — no <img>/<video>-style request here is subject to
+  // CORS either, since the browser renders the response directly rather than handing its
+  // bytes to page JS.
+  const recordingUrl = session?.recording_file_path
+    ? `${BASE_URL}/interviews/${sessionId}/media/recording`
+    : null;
 
   const refresh = useCallback(() => {
     getJson<InterviewSession>(`/interviews/${sessionId}`).then(setSession);

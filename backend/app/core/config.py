@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     oauth_redirect_base_url: str = "http://localhost:8000/api/v1"
     frontend_base_url: str = "http://localhost:3000"
 
+    # Root logger level (see core/logging.py) — DEBUG is noisy in normal operation but
+    # useful when actually chasing something like a background task failure.
+    log_level: str = "INFO"
+
     class Config:
         env_file = ".env"
 

@@ -15,6 +15,14 @@ export interface WebRTCApi {
   requestPeerMute: () => void;
 }
 
+/**
+ * Requests camera/mic and opens the signaling connection as soon as this component
+ * mounts — there is no internal "idle until told" gate. Both call sites (the candidate
+ * and interviewer pages) rely on that: they show their own explicit "Join Meet" button
+ * first and only render this component once it's clicked, rather than mounting it
+ * immediately on page load. Don't render this behind a route/stage that isn't itself
+ * gated on an explicit user action, or camera/mic + the call will start without consent.
+ */
 interface WebRTCRoomProps {
   sessionId: string;
   /** join_token or interviewer_join_token, matching `role`. */
@@ -58,9 +66,16 @@ export default function WebRTCRoom({
   const [hasRemoteScreen, setHasRemoteScreen] = useState(false);
   const [peerPresent, setPeerPresent] = useState(false);
   // Read via ref inside the connection effect below so passing a new track object doesn't
-  // need to (and shouldn't) tear down and rebuild the whole peer connection.
+  // need to (and shouldn't) tear down and rebuild the whole peer connection. The write
+  // itself has to happen in its own effect, not directly in the render body — mutating a
+  // ref during render is unsound (react-hooks/refs): render isn't guaranteed to run
+  // exactly once per commit (Strict Mode's double-invoke, future concurrent rendering),
+  // so a direct write here could apply more than once or be visible before the value it's
+  // based on is actually committed.
   const extraVideoTrackRef = useRef<MediaStreamTrack | null | undefined>(extraVideoTrack);
-  extraVideoTrackRef.current = extraVideoTrack;
+  useEffect(() => {
+    extraVideoTrackRef.current = extraVideoTrack;
+  }, [extraVideoTrack]);
 
   // The screen-share <video> only renders once hasRemoteScreen flips true, so on the very
   // first screen-share track the ref isn't attached yet when ontrack fires — stash the

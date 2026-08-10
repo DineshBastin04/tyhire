@@ -7,9 +7,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.v1 import api_router
 from app.core.config import settings
+from app.core.logging import setup_logging
 from app.db.session import Base, SessionLocal, engine
 from app import models  # noqa: F401 - ensures models are registered on Base before create_all
 from app.models.user import User
+
+setup_logging()
 
 app = FastAPI(title="TyHire")
 

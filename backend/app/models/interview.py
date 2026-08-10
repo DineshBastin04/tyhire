@@ -39,6 +39,14 @@ class InterviewSession(Base):
     video_room_token = Column(String, unique=True, nullable=False)
 
     recording_file_path = Column(String, nullable=True)
+    # Completed segments left behind when the candidate's browser starts a brand new
+    # MediaRecorder mid-session (reload/reconnect after a drop) — a fresh recorder's first
+    # chunk carries its own WebM header, so blindly appending it onto recording_file_path
+    # would embed a second independent container inside one file, unreadable past the
+    # first by ffmpeg/Whisper/a <video> tag. append_recording_chunk (storage.py) detects
+    # that and rolls the current file in here instead; /complete's handler stitches
+    # everything back into one file via storage.concat_segments before encrypting it.
+    recording_segment_paths = Column(JSON, nullable=False, default=list)
     transcript = Column(Text, nullable=True)
     transcript_status = Column(String, nullable=True)  # "pending" | "done" | "failed"
     started_recording_at = Column(DateTime(timezone=True), nullable=True)
@@ -48,6 +56,9 @@ class InterviewSession(Base):
     # ever captured, which makes real Q&A cross-verification unreliable (see qa_analysis).
     interviewer_join_token = Column(String, unique=True, nullable=True)
     interviewer_recording_file_path = Column(String, nullable=True)
+    # Same segment-rollover tracking as recording_segment_paths, for the interviewer's own
+    # (audio-only) recording.
+    interviewer_recording_segment_paths = Column(JSON, nullable=False, default=list)
     interviewer_transcript = Column(Text, nullable=True)
     interviewer_transcript_status = Column(String, nullable=True)
     interviewer_started_recording_at = Column(DateTime(timezone=True), nullable=True)
@@ -126,6 +137,10 @@ class SignalType(str, enum.Enum):
     screen_share_partial = "screen_share_partial"
     screen_share_stopped = "screen_share_stopped"
     location_mismatch = "location_mismatch"
+    # DOM-signature heuristic (lib/extensionDetection.ts) for AI answer-helper browser
+    # extensions (Monica AI, Sider, Merlin, and similar ChatGPT-sidebar-style tools)
+    # injecting their own elements into the page during the interview.
+    ai_extension_detected = "ai_extension_detected"
 
 
 class SignalEvent(Base):

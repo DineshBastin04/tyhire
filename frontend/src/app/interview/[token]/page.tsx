@@ -5,6 +5,13 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
 import { createFaceSignalDetector } from "@/lib/faceDetection";
+import { detectAiExtensionArtifacts } from "@/lib/extensionDetection";
+import {
+  exitFullscreen,
+  isFullscreenActive,
+  onFullscreenChange as watchFullscreenChange,
+  requestFullscreen,
+} from "@/lib/fullscreen";
 import type { InterviewSession, SignalType } from "@/lib/types";
 
 type Stage =
@@ -14,6 +21,7 @@ type Stage =
   | "identity"
   | "screenshare"
   | "starting"
+  | "ready"
   | "interview"
   | "completed";
 
@@ -46,6 +54,14 @@ export default function InterviewJoinPage() {
   const [error, setError] = useState<string | null>(null);
   const [finishHadError, setFinishHadError] = useState(false);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  // The screen-share track itself lives in state, not read off screenStreamRef during
+  // render below (WebRTCRoom's extraVideoTrack prop) — reading a ref's .current during
+  // render is unsound (react-hooks/refs): render isn't guaranteed to observe a consistent
+  // value, e.g. under Strict Mode's double-invoke or any future concurrent rendering.
+  // screenStreamRef itself stays a ref because its other use (finish()'s stop-tracks
+  // call, InterviewRecorder below) is a real imperative access in an event handler, not a
+  // render read.
+  const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
   const startRef = useRef<number>(Date.now());
 
   useEffect(() => {
@@ -72,15 +88,20 @@ export default function InterviewJoinPage() {
       <ScreenShareGate
         session={session}
         screenStreamRef={screenStreamRef}
+        onScreenTrack={setScreenTrack}
         startRef={startRef}
         onDone={() => setStage("starting")}
       />
     );
   if (stage === "starting")
+    return <StartGate session={session} onReady={() => setStage("ready")} />;
+  if (stage === "ready")
     return (
-      <StartGate
-        session={session}
-        onReady={() => {
+      <JoinGate
+        onJoin={() => {
+          // The interview clock starts here, at the actual join click, not when /start
+          // succeeded above — otherwise time spent reading this screen before joining
+          // would wrongly count against every signal's session_offset_ms below.
           startRef.current = Date.now();
           setStage("interview");
         }}
@@ -91,6 +112,7 @@ export default function InterviewJoinPage() {
       <InterviewRecorder
         session={session}
         screenStreamRef={screenStreamRef}
+        screenTrack={screenTrack}
         startRef={startRef}
         onDone={(hadError) => {
           setFinishHadError(hadError);
@@ -102,12 +124,18 @@ export default function InterviewJoinPage() {
 }
 
 function CompletedScreen({ hadError }: { hadError: boolean }) {
+  const [closeFailed, setCloseFailed] = useState(false);
+
   function handleClose() {
     // Best-effort — script-initiated tab close only works for tabs opened by script, which
-    // this one wasn't (it's a normal navigated-to link), so most browsers will silently
-    // ignore this. The teardown that actually matters (camera/mic/screen-share) already
-    // happened before this screen ever rendered, in InterviewRecorder.finish().
+    // this one wasn't (it's a normal navigated-to link), so most browsers silently ignore
+    // this with no error and no event to detect it by. If we're still here a moment
+    // later, it clearly didn't work — fall back to telling the candidate to close the tab
+    // themselves instead of leaving an unresponsive button with no explanation. The
+    // teardown that actually matters (camera/mic/screen-share) already happened before
+    // this screen ever rendered, in InterviewRecorder.finish().
     window.close();
+    setTimeout(() => setCloseFailed(true), 300);
   }
 
   return (
@@ -121,9 +149,16 @@ function CompletedScreen({ hadError }: { hadError: boolean }) {
             : "Thanks — your interview has been submitted for review. Your camera, " +
               "microphone, and screen sharing have been turned off."}
         </p>
-        <button onClick={handleClose} className="btn-outline">
-          Close
-        </button>
+        {closeFailed ? (
+          <p className="text-sm text-zinc-500">
+            This tab can&apos;t be closed automatically — go ahead and close it yourself
+            (or just navigate away). Everything has already been submitted.
+          </p>
+        ) : (
+          <button onClick={handleClose} className="btn-outline">
+            Close
+          </button>
+        )}
       </div>
     </Centered>
   );
@@ -337,11 +372,13 @@ function sendSignal(session: InterviewSession, signal_type: SignalType, session_
 function ScreenShareGate({
   session,
   screenStreamRef,
+  onScreenTrack,
   startRef,
   onDone,
 }: {
   session: InterviewSession;
   screenStreamRef: RefObject<MediaStream | null>;
+  onScreenTrack: (track: MediaStreamTrack) => void;
   startRef: RefObject<number>;
   onDone: () => void;
 }) {
@@ -352,13 +389,16 @@ function ScreenShareGate({
     setRequesting(true);
     setError(null);
     // Fired in the same click as getDisplayMedia below so it still counts as a user
-    // gesture — awaiting first can lose that context in some browsers.
-    document.documentElement.requestFullscreen?.().catch(() => {});
+    // gesture — awaiting first can lose that context in some browsers. Not the only
+    // place this is attempted (see JoinGate) — screen-share can be declined/retried, and
+    // fullscreen shouldn't depend on that succeeding first.
+    requestFullscreen().catch(() => {});
 
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = stream;
       const track = stream.getVideoTracks()[0];
+      onScreenTrack(track);
       const settings = track.getSettings() as MediaTrackSettings & { displaySurface?: string };
 
       if (settings.displaySurface && settings.displaySurface !== "monitor") {
@@ -467,14 +507,45 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
   return <Centered>Checking…</Centered>;
 }
 
+function JoinGate({ onJoin }: { onJoin: () => void }) {
+  return (
+    <Centered>
+      <div className="space-y-4">
+        <h1 className="text-lg font-semibold">Ready to begin</h1>
+        <p className="text-sm text-zinc-600">
+          Clicking below turns on your camera and microphone and connects you to the
+          interviewer — nothing starts before that. Make sure you&apos;re somewhere quiet
+          and well-lit first.
+        </p>
+        <button
+          onClick={() => {
+            // Fired synchronously in this click, same reasoning as ScreenShareGate — this
+            // is the second of two independent attempts, not a fallback for the first: if
+            // the candidate declined/never reached screen-share fullscreen for whatever
+            // reason, the interview itself still shouldn't be the one place fullscreen was
+            // never even tried.
+            requestFullscreen().catch(() => {});
+            onJoin();
+          }}
+          className="btn-primary"
+        >
+          Join Meet
+        </button>
+      </div>
+    </Centered>
+  );
+}
+
 function InterviewRecorder({
   session,
   screenStreamRef,
+  screenTrack,
   startRef,
   onDone,
 }: {
   session: InterviewSession;
   screenStreamRef: RefObject<MediaStream | null>;
+  screenTrack: MediaStreamTrack | null;
   startRef: RefObject<number>;
   onDone: (hadError: boolean) => void;
 }) {
@@ -506,8 +577,42 @@ function InterviewRecorder({
   }
 
   useEffect(() => {
-    const onVisibility = () => document.hidden && pushSignal("tab_switch");
-    const onBlur = () => pushSignal("window_blur");
+    // Alt-tabbing away fires BOTH of these for the exact same action — the window loses
+    // OS focus (blur) at essentially the same instant the tab becomes hidden
+    // (visibilitychange) — but their relative order isn't guaranteed across
+    // browsers/OSes. Left unguarded, one alt-tab used to reach the backend as two
+    // distinct signal types in the same fusion cluster, which (via integrity.py's
+    // type-diversity multiplier) tripled its severity for what is really one event, not
+    // two independent suspicious behaviors. window_blur is still pushed on its own for
+    // genuine standalone focus loss (e.g. clicking a second monitor's window without the
+    // tab ever going hidden) — only the redundant alt-tab case is suppressed here.
+    const TAB_SWITCH_BLUR_DEDUP_MS = 500;
+    let tabSwitchJustHappened = false;
+    let tabSwitchResetTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingBlurTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const onVisibility = () => {
+      if (!document.hidden) return;
+      tabSwitchJustHappened = true;
+      clearTimeout(tabSwitchResetTimer);
+      tabSwitchResetTimer = setTimeout(() => {
+        tabSwitchJustHappened = false;
+      }, TAB_SWITCH_BLUR_DEDUP_MS);
+      if (pendingBlurTimer) {
+        clearTimeout(pendingBlurTimer);
+        pendingBlurTimer = undefined;
+      }
+      pushSignal("tab_switch");
+    };
+    const onBlur = () => {
+      if (tabSwitchJustHappened) return;
+      // blur can fire before visibilitychange for the same alt-tab — hold this briefly so
+      // an about-to-arrive tab_switch can still cancel it via the branch above.
+      pendingBlurTimer = setTimeout(() => {
+        pendingBlurTimer = undefined;
+        pushSignal("window_blur");
+      }, TAB_SWITCH_BLUR_DEDUP_MS);
+    };
     const onCopy = () => pushSignal("copy_paste");
     const onPaste = () => pushSignal("copy_paste");
     document.addEventListener("visibilitychange", onVisibility);
@@ -516,17 +621,18 @@ function InterviewRecorder({
     document.addEventListener("paste", onPaste);
 
     // Only flags an EXIT after having actually been in fullscreen — never flags simply
-    // "never entered fullscreen" (requestFullscreen in the previous step is best-effort).
-    let wasFullscreen = !!document.fullscreenElement;
-    const onFullscreenChange = () => {
-      if (document.fullscreenElement) {
+    // "never entered fullscreen" (requestFullscreen in the previous steps is best-effort).
+    // isFullscreenActive/watchFullscreenChange also check Safari's webkit-prefixed
+    // fullscreenElement/fullscreenchange, which the plain unprefixed versions miss there.
+    let wasFullscreen = isFullscreenActive();
+    const stopWatchingFullscreen = watchFullscreenChange(() => {
+      if (isFullscreenActive()) {
         wasFullscreen = true;
       } else if (wasFullscreen) {
         pushSignal("fullscreen_exit");
         wasFullscreen = false;
       }
-    };
-    document.addEventListener("fullscreenchange", onFullscreenChange);
+    });
 
     // DevTools heuristic: a docked panel shrinks the viewport relative to the outer window.
     // Explicitly unreliable (the user's own window sizing can trigger it) — kept as a
@@ -535,6 +641,19 @@ function InterviewRecorder({
       const widthDiff = window.outerWidth - window.innerWidth;
       const heightDiff = window.outerHeight - window.innerHeight;
       if (widthDiff > 160 || heightDiff > 160) pushSignal("devtools_open");
+    }, 4000);
+
+    // AI answer-helper browser extension (Monica AI, Sider, etc.) DOM-signature check —
+    // see lib/extensionDetection.ts. Once flagged, presence is stable for the rest of the
+    // call (the extension doesn't uninstall itself mid-interview), so this only pushes
+    // the signal once rather than every 4s for the remainder of the interview.
+    let aiExtensionFlagged = false;
+    const extensionInterval = setInterval(() => {
+      if (aiExtensionFlagged) return;
+      if (detectAiExtensionArtifacts()) {
+        aiExtensionFlagged = true;
+        pushSignal("ai_extension_detected");
+      }
     }, 4000);
 
     // window.screen.isExtended: a lighter, permission-free complement to the
@@ -681,8 +800,11 @@ function InterviewRecorder({
       window.removeEventListener("blur", onBlur);
       document.removeEventListener("copy", onCopy);
       document.removeEventListener("paste", onPaste);
-      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      clearTimeout(tabSwitchResetTimer);
+      clearTimeout(pendingBlurTimer);
+      stopWatchingFullscreen();
       clearInterval(devtoolsInterval);
+      clearInterval(extensionInterval);
       clearInterval(flushInterval);
       clearInterval(faceInterval);
       clearInterval(sentimentInterval);
@@ -701,7 +823,7 @@ function InterviewRecorder({
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (isFullscreenActive()) exitFullscreen().catch(() => {});
 
     let hadError = false;
     try {
@@ -735,7 +857,7 @@ function InterviewRecorder({
           token={session.join_token}
           role="candidate"
           iceServers={session.ice_servers}
-          extraVideoTrack={screenStreamRef.current?.getVideoTracks()[0] ?? null}
+          extraVideoTrack={screenTrack}
           onApiReady={(api) => {
             webrtcApiRef.current = api;
           }}
