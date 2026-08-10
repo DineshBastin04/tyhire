@@ -19,6 +19,9 @@ export default function ReviewDetailPage() {
   const [flags, setFlags] = useState<IntegrityFlag[]>([]);
   const [identityCheck, setIdentityCheck] = useState<IdentityCheck | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  // Distinguishes "still loading" from "the fetch failed" — without it a failed session
+  // fetch left the page on "Loading…" forever (and an unhandled promise rejection).
+  const [loadError, setLoadError] = useState(false);
 
   // Fetched (not a plain <video src>) so the HR session cookie is reliably sent and the
   // recording — possibly encrypted at rest — goes through the authenticated, decrypting
@@ -44,8 +47,15 @@ export default function ReviewDetailPage() {
   }, [session?.recording_file_path, sessionId]);
 
   const refresh = useCallback(() => {
-    getJson<InterviewSession>(`/interviews/${sessionId}`).then(setSession);
-    getJson<IntegrityFlag[]>(`/interviews/${sessionId}/flags`).then(setFlags);
+    getJson<InterviewSession>(`/interviews/${sessionId}`)
+      .then((s) => {
+        setSession(s);
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
+    getJson<IntegrityFlag[]>(`/interviews/${sessionId}/flags`)
+      .then(setFlags)
+      .catch(() => setFlags([]));
     getJson<IdentityCheck>(`/interviews/${sessionId}/identity-check`)
       .then(setIdentityCheck)
       .catch(() => setIdentityCheck(null));
@@ -77,6 +87,21 @@ export default function ReviewDetailPage() {
     refresh();
   }
 
+  // Only a hard failure with nothing rendered yet becomes a dead end — a transient failure
+  // during the transcript-polling refresh keeps the already-loaded page up instead.
+  if (loadError && !session) {
+    return (
+      <div className="p-6 space-y-3 text-sm">
+        <p className="text-red-600">
+          Couldn&apos;t load this review session. It may not exist, or your login may have
+          expired.
+        </p>
+        <button onClick={refresh} className="btn-primary">
+          Try again
+        </button>
+      </div>
+    );
+  }
   if (!session) return <p className="p-6 text-zinc-500">Loading…</p>;
 
   return (
