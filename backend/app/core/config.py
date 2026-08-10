@@ -30,10 +30,17 @@ class Settings(BaseSettings):
     # up like any other credential; it is NOT the same thing as SESSION_SECRET.
     storage_encryption_key: str | None = None
 
-    # How long raw ID/selfie images are kept before POST /interviews/cleanup-expired-media
-    # deletes the image files (keeping only the verdict/confidence, not the images) —
-    # similar in spirit to the retention limits biometric-privacy statutes typically require.
+    # How long raw ID/selfie images are kept before the retention sweep deletes the image
+    # files (keeping only the verdict/confidence, not the images) — similar in spirit to the
+    # retention limits biometric-privacy statutes typically require.
     identity_media_retention_days: int = 90
+
+    # The app enforces identity_media_retention_days itself via an in-process daily sweep so
+    # retention doesn't silently depend on someone remembering to hit the manual endpoint.
+    # Disable it (and drive `python -m app.jobs.run_retention_sweep` from external cron
+    # instead) if you run multiple backend workers/replicas, so only one process sweeps.
+    retention_sweep_enabled: bool = True
+    retention_sweep_interval_hours: int = 24
 
     # Our own coturn TURN server (docker-compose.yml's coturn service) — a fallback relay
     # for the browser-to-browser call when a direct connection can't be made (strict

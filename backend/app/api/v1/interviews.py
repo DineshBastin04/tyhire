@@ -50,6 +50,7 @@ from app.schemas.interview import (
     StartSessionResponse,
 )
 from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
+from app.services.retention import purge_expired_identity_media
 from app.services.audio_extract import extract_audio_wav
 from app.services.facial_analysis import analyze_facial_affect
 from app.services.identity_check import check_identity_match
@@ -180,32 +181,12 @@ def get_interviewer_recording(session_id: uuid.UUID, db: Session = Depends(get_d
 
 @router.post("/cleanup-expired-media", dependencies=[Depends(require_hr_auth)])
 def cleanup_expired_media(db: Session = Depends(get_db)):
-    """Deletes raw ID/selfie image files past the retention window, keeping the verdict/
-    confidence for audit purposes — not the images themselves. No scheduler exists in this
-    POC, so this is HR-triggered rather than automatic; wire it to a cron job for real use."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.identity_media_retention_days)
-    expired = (
-        db.query(IdentityCheck)
-        .filter(IdentityCheck.created_at < cutoff, IdentityCheck.id_document_path.isnot(None))
-        .all()
-    )
-
-    deleted = 0
-    for check in expired:
-        for path in (check.id_document_path, check.selfie_path):
-            if not path:
-                continue
-            try:
-                os.remove(storage.absolute_path(path))
-            except OSError:
-                pass
-        check.id_document_path = None
-        check.selfie_path = None
-        db.add(check)
-        deleted += 1
-
-    db.commit()
-    return {"identity_checks_cleaned": deleted}
+    """Manually clears raw ID/selfie image files past the retention window, keeping the
+    verdict/confidence for audit purposes — not the images themselves. Retention is also
+    enforced automatically by the in-process daily sweep (see app.main) and can be driven by
+    external cron (python -m app.jobs.run_retention_sweep); all three share the same logic."""
+    cleared = purge_expired_identity_media(db)
+    return {"identity_checks_cleaned": cleared}
 
 
 @router.get(
@@ -434,6 +415,18 @@ def start_session(
             status_code=409,
             detail="Identity verification did not match. Contact HR to proceed.",
         )
+
+    # Both gates passed — the interview is actually beginning now, so advance the session out
+    # of any pre-start state. Without this a session that required HR identity review stayed
+    # stuck at identity_pending: for a no_match verdict, right through the live interview once
+    # HR cleared it; for verdicts that don't hard-block start (uncertain / liveness fail), all
+    # the way to /complete. Either way HR saw a stale identity_pending status the whole time.
+    # Idempotent — /start is retried on reload — and can't clobber `completed`, which
+    # require_session_token already rejects before this handler runs.
+    if session.status in (SessionStatus.scheduled, SessionStatus.identity_pending):
+        session.status = SessionStatus.in_progress
+        db.add(session)
+        db.commit()
 
     return StartSessionResponse(started=True)
 
@@ -764,6 +757,8 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 session.interviewer_transcript = f"Transcription failed: {exc}"
                 session.interviewer_transcript_status = "failed"
 
+        # Q&A verification is the one post-processing step that genuinely needs the transcript
+        # TEXT, so it stays gated on a successful transcription.
         if session.transcript_status == "done":
             try:
                 session.merged_transcript = merge_transcripts(
@@ -776,19 +771,25 @@ def _process_recordings_and_save(session_id: uuid.UUID):
             except Exception as exc:  # noqa: BLE001 - best-effort, not core status
                 session.qa_analysis = {"error": str(exc)}
 
-            try:
-                if not candidate_wav_path:
-                    raise RuntimeError("No extracted audio available (transcription step failed earlier)")
-                session.voice_tone_analysis = analyze_voice_tone(candidate_wav_path)
-            except Exception as exc:  # noqa: BLE001 - best-effort, not core status
-                session.voice_tone_analysis = {"error": str(exc)}
+        # Voice-tone and facial-affect analysis do NOT depend on the transcript text — voice
+        # tone reads only the extracted audio WAV, and facial affect reads video frames
+        # straight from the recording. They used to run inside the transcript-done branch
+        # above, so any transcription failure (e.g. Whisper rejecting an oversized file)
+        # silently discarded two unrelated signals the reviewer relies on. Run them
+        # independently so each degrades on its own actual failure, not on transcription's.
+        try:
+            if not candidate_wav_path:
+                raise RuntimeError("No extracted audio available (audio extraction failed earlier)")
+            session.voice_tone_analysis = analyze_voice_tone(candidate_wav_path)
+        except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            session.voice_tone_analysis = {"error": str(exc)}
 
-            try:
-                with storage.decrypted_temp_copy(session.recording_file_path) as path:
-                    frame_paths = extract_frames(path)
-                    session.facial_affect_analysis = analyze_facial_affect(frame_paths)
-            except Exception as exc:  # noqa: BLE001 - best-effort, not core status
-                session.facial_affect_analysis = {"error": str(exc)}
+        try:
+            with storage.decrypted_temp_copy(session.recording_file_path) as path:
+                frame_paths = extract_frames(path)
+                session.facial_affect_analysis = analyze_facial_affect(frame_paths)
+        except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            session.facial_affect_analysis = {"error": str(exc)}
 
         db.add(session)
         db.commit()

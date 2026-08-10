@@ -1,8 +1,12 @@
+import asyncio
+import contextlib
+import logging
 import os
 
 import bcrypt
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.v1 import api_router
@@ -10,6 +14,9 @@ from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
 from app import models  # noqa: F401 - ensures models are registered on Base before create_all
 from app.models.user import User
+from app.services.retention import purge_expired_identity_media
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TyHire")
 
@@ -33,6 +40,9 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+_retention_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
@@ -61,6 +71,46 @@ def on_startup():
         pass
 
     _bootstrap_initial_admin()
+
+
+@app.on_event("startup")
+async def _start_retention_sweeper():
+    """Enforces the identity-media retention window automatically, so retention doesn't
+    silently depend on someone remembering to POST /interviews/cleanup-expired-media. Runs
+    in-process on the single uvicorn worker; disable via RETENTION_SWEEP_ENABLED and use the
+    standalone job (app.jobs.run_retention_sweep) under external cron for multi-worker setups.
+    Registered after on_startup, so create_all has already run before the first sweep."""
+    if not settings.retention_sweep_enabled:
+        return
+    global _retention_task
+    _retention_task = asyncio.create_task(_retention_sweep_loop())
+
+
+async def _retention_sweep_loop():
+    interval_seconds = max(1, settings.retention_sweep_interval_hours) * 3600
+    while True:
+        try:
+            # Sync SQLAlchemy/psycopg2 work — off the event loop so it can't block requests.
+            await run_in_threadpool(_run_retention_sweep_once)
+        except Exception:  # noqa: BLE001 - a failed cycle must never kill the recurring loop
+            logger.exception("retention sweep cycle failed")
+        await asyncio.sleep(interval_seconds)
+
+
+def _run_retention_sweep_once():
+    db = SessionLocal()
+    try:
+        purge_expired_identity_media(db)
+    finally:
+        db.close()
+
+
+@app.on_event("shutdown")
+async def _stop_retention_sweeper():
+    if _retention_task is not None:
+        _retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _retention_task
 
 
 def _bootstrap_initial_admin():

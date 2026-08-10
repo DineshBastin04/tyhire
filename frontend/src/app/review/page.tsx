@@ -11,11 +11,17 @@ export default function ReviewQueuePage() {
   const { confirm, notify } = useDialog();
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
   const [loading, setLoading] = useState(true);
+  // Without this a failed queue fetch was indistinguishable from a genuinely empty queue —
+  // both rendered "Nothing needs review", so a reviewer could see "all clear" while flagged
+  // sessions piled up unseen behind an expired login or a backend error.
+  const [error, setError] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
 
   const refresh = useCallback(() => {
+    setError(false);
     getJson<InterviewSession[]>("/interviews/review/queue")
       .then(setSessions)
+      .catch(() => setError(true))
       .finally(() => setLoading(false));
   }, []);
 
@@ -56,7 +62,18 @@ export default function ReviewQueuePage() {
       </p>
 
       {loading && <p className="text-zinc-500 text-sm">Loading…</p>}
-      {!loading && sessions.length === 0 && (
+      {!loading && error && (
+        <div className="space-y-2 text-sm">
+          <p className="text-red-600">
+            Couldn&apos;t load the review queue. Your login may have expired, or the server may
+            be unreachable.
+          </p>
+          <button onClick={refresh} className="btn-primary">
+            Try again
+          </button>
+        </div>
+      )}
+      {!loading && !error && sessions.length === 0 && (
         <p className="text-zinc-500 text-sm">Nothing needs review right now.</p>
       )}
 

@@ -102,12 +102,19 @@ export default function InterviewJoinPage() {
 }
 
 function CompletedScreen({ hadError }: { hadError: boolean }) {
+  // Script-initiated tab close only works for tabs opened by script, which this one wasn't
+  // (it's a normal navigated-to link), so most browsers silently ignore window.close(). We
+  // still attempt it — it succeeds in the rare script-opened case — but immediately fall
+  // back to an explicit "you can close this tab" instruction so the button never appears to
+  // do nothing. The teardown that actually matters (camera/mic/screen-share) already happened
+  // before this screen ever rendered, in InterviewRecorder.finish().
+  const [closeBlocked, setCloseBlocked] = useState(false);
+
   function handleClose() {
-    // Best-effort — script-initiated tab close only works for tabs opened by script, which
-    // this one wasn't (it's a normal navigated-to link), so most browsers will silently
-    // ignore this. The teardown that actually matters (camera/mic/screen-share) already
-    // happened before this screen ever rendered, in InterviewRecorder.finish().
     window.close();
+    // If the tab were script-closable it's already gone and this state update never renders;
+    // otherwise we surface the manual-close hint in its place.
+    setCloseBlocked(true);
   }
 
   return (
@@ -121,9 +128,16 @@ function CompletedScreen({ hadError }: { hadError: boolean }) {
             : "Thanks — your interview has been submitted for review. Your camera, " +
               "microphone, and screen sharing have been turned off."}
         </p>
-        <button onClick={handleClose} className="btn-outline">
-          Close
-        </button>
+        {closeBlocked ? (
+          <p className="text-sm text-zinc-500">
+            You can now safely close this tab. (Your browser won&apos;t let the page close
+            itself, so please close the tab manually — everything has already been submitted.)
+          </p>
+        ) : (
+          <button onClick={handleClose} className="btn-outline">
+            Close
+          </button>
+        )}
       </div>
     </Centered>
   );
@@ -454,6 +468,15 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
   const [status, setStatus] = useState<"checking" | "waiting_probe" | "identity_blocked" | "error">(
     "checking"
   );
+  // Bumped by the manual retry button to re-run the start attempt in place — needed because a
+  // hard identity block (or a generic error) is otherwise a dead end: once HR clears the
+  // no_match there's no way forward short of a full page reload, which isn't discoverable.
+  const [retryKey, setRetryKey] = useState(0);
+
+  function retry() {
+    setStatus("checking");
+    setRetryKey((k) => k + 1);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -483,7 +506,7 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id]);
+  }, [session.id, retryKey]);
 
   if (status === "waiting_probe") {
     return (
@@ -513,14 +536,30 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
   if (status === "identity_blocked") {
     return (
       <Centered>
-        Identity verification didn&apos;t match. Please contact HR before continuing — do not
-        close this window until you&apos;ve been in touch with them.
+        <span className="block space-y-3">
+          <span className="block">
+            Identity verification didn&apos;t match. Please contact HR before continuing — do
+            not close this window until you&apos;ve been in touch with them.
+          </span>
+          <button onClick={retry} className="btn-primary">
+            I&apos;ve spoken to HR — try again
+          </button>
+        </span>
       </Centered>
     );
   }
 
   if (status === "error") {
-    return <Centered>Could not start the interview. Please refresh and try again.</Centered>;
+    return (
+      <Centered>
+        <span className="block space-y-3">
+          <span className="block">Could not start the interview.</span>
+          <button onClick={retry} className="btn-primary">
+            Try again
+          </button>
+        </span>
+      </Centered>
+    );
   }
 
   return <Centered>Checking…</Centered>;
