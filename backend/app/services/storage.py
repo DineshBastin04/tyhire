@@ -13,6 +13,11 @@ recording is finished (see finalize_encrypt, called from POST /complete). Any co
 needs a real filesystem path to hand to ffmpeg/whisper (which can't read a Fernet token
 directly) goes through decrypted_temp_copy, which transparently no-ops when no key is
 configured — this whole module behaves exactly as before if STORAGE_ENCRYPTION_KEY is unset.
+
+Encryption only ever applies to files written *after* the key is set. Files written while it
+was unset stay plaintext on disk, and read_file serves them as-is (it only decrypts .enc
+paths). To encrypt that pre-existing backlog after enabling the key, run the one-shot backfill
+once: `python -m app.jobs.encrypt_storage_backfill` (see services/storage_backfill.py).
 """
 import contextlib
 import os
