@@ -39,11 +39,30 @@ def _ensure_dir(sub_dir: str) -> str:
     return full_dir
 
 
+def _sanitize_filename(filename: str) -> str:
+    """Strips directory components and traversal/ADS tricks from a client-supplied
+    filename, keeping only a safe basename. Callers only need the extension/display
+    name out of this value — the actual on-disk uniqueness comes from the uuid prefix
+    added by save_file."""
+    # Drop any directory portion regardless of which separator style the client used
+    # (ntpath.basename / posixpath.basename only understand their own platform's).
+    name = filename.replace("\\", "/").split("/")[-1]
+    name = name.split(":")[0]  # strip NTFS alternate-data-stream suffixes
+    name = name.strip().strip(".")
+    return name or "file"
+
+
+def _within_directory(directory: str, full_path: str) -> bool:
+    real_dir = os.path.realpath(directory)
+    real_path = os.path.realpath(full_path)
+    return os.path.commonpath([real_dir, real_path]) == real_dir
+
+
 def save_file(sub_dir: str, filename: str, content: bytes) -> str:
     """Saves content under storage_root/sub_dir/<uuid>_<filename> (encrypted, plus a
     trailing .enc, if a key is configured) and returns the relative path."""
     directory = _ensure_dir(sub_dir)
-    safe_name = f"{uuid.uuid4().hex}_{filename}"
+    safe_name = f"{uuid.uuid4().hex}_{_sanitize_filename(filename)}"
 
     fernet = _fernet()
     if fernet:
@@ -51,6 +70,8 @@ def save_file(sub_dir: str, filename: str, content: bytes) -> str:
         safe_name += ENCRYPTED_SUFFIX
 
     full_path = os.path.join(directory, safe_name)
+    if not _within_directory(directory, full_path):
+        raise ValueError(f"invalid filename: {filename!r}")
     with open(full_path, "wb") as f:
         f.write(content)
     return os.path.join(sub_dir, safe_name)
@@ -61,10 +82,13 @@ def append_file_chunk(sub_dir: str, filename: str, chunk: bytes) -> str:
     plaintext while growing — see module docstring; call finalize_encrypt once the file
     is done growing if it needs to be encrypted at rest."""
     directory = _ensure_dir(sub_dir)
-    full_path = os.path.join(directory, filename)
+    safe_name = _sanitize_filename(filename)
+    full_path = os.path.join(directory, safe_name)
+    if not _within_directory(directory, full_path):
+        raise ValueError(f"invalid filename: {filename!r}")
     with open(full_path, "ab") as f:
         f.write(chunk)
-    return os.path.join(sub_dir, filename)
+    return os.path.join(sub_dir, safe_name)
 
 
 def finalize_encrypt(relative_path: str | None) -> str | None:

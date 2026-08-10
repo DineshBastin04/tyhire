@@ -8,10 +8,9 @@ class Settings(BaseSettings):
     storage_root: str = "../storage"
     cors_origins: list[str] = ["http://localhost:3000"]
 
-    # Signs the HR session cookie — rotating this logs everyone out. Change for anything
-    # beyond local testing; the fallback exists so the app doesn't hard-crash if unset, not
-    # because it's safe.
-    session_secret: str = "dev-secret-change-me"
+    # Signs the HR session cookie — rotating this logs everyone out. Required, with no
+    # fallback: a guessable default here would let anyone forge a valid HR session cookie.
+    session_secret: str
 
     # Per-user HR accounts live in the `users` table now, created via POST /auth/users once
     # someone is logged in — but that requires a first account to already exist. If the
@@ -42,7 +41,9 @@ class Settings(BaseSettings):
     # TURN_SECRET; used to mint short-lived per-call credentials (services/video_provider.py)
     # rather than one fixed shared password.
     turn_domain: str = "localhost"
-    turn_secret: str = "dev-turn-secret-change-me"
+    # Required, with no fallback: a guessable default here would let anyone mint valid
+    # TURN relay credentials against our coturn instance.
+    turn_secret: str
 
     # Google/Microsoft sign-in for HR (Phase 4) — only usable by emails that already match
     # an existing active user; blank until you create these in each provider's console.
@@ -52,6 +53,10 @@ class Settings(BaseSettings):
     microsoft_client_secret: str | None = None
     oauth_redirect_base_url: str = "http://localhost:8000/api/v1"
     frontend_base_url: str = "http://localhost:3000"
+
+    livekit_url: str | None = None
+    livekit_api_key: str | None = None
+    livekit_api_secret: str | None = None
 
     class Config:
         env_file = ".env"

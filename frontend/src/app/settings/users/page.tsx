@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { deleteJson, getJson, postJson } from "@/lib/api";
+import { useDialog } from "@/components/Dialog";
 import type { HrUser } from "@/lib/types";
 
 export default function HrUsersPage() {
+  const { confirm, notify } = useDialog();
   const [users, setUsers] = useState<HrUser[]>([]);
   const [currentEmail, setCurrentEmail] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -50,12 +52,21 @@ export default function HrUsersPage() {
   }
 
   async function handleDelete(user: HrUser) {
-    if (!window.confirm(`Remove ${user.display_name ?? user.email} from HR users?`)) return;
+    const ok = await confirm({
+      title: "Remove HR user",
+      description: `Remove ${user.display_name ?? user.email} from HR users?`,
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteJson(`/auth/users/${user.id}`, {});
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Could not delete this user.");
+      await notify({
+        title: "Could not remove user",
+        description: err instanceof Error ? err.message : "Could not delete this user.",
+      });
     }
   }
 

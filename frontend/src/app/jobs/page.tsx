@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { deleteJson, getJson, postJson } from "@/lib/api";
+import { useDialog } from "@/components/Dialog";
 import type { Job } from "@/lib/types";
 
 export default function JobsPage() {
+  const { confirm, prompt, notify } = useDialog();
   const router = useRouter();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,8 +29,11 @@ export default function JobsPage() {
   }
 
   async function handleArchive(jobId: string) {
-    const reason = window.prompt("Reason for archiving this job (goes into the audit log):");
-    if (!reason || !reason.trim()) return;
+    const reason = await prompt({
+      title: "Archive job",
+      description: "Reason for archiving this job (goes into the audit log):",
+    });
+    if (!reason) return;
     await postJson(`/jobs/${jobId}/archive`, { reason });
     refresh();
   }
@@ -39,23 +44,33 @@ export default function JobsPage() {
   }
 
   async function handleDelete(jobId: string, title: string) {
-    const confirmed = window.confirm(
-      `Permanently delete "${title}"? This also permanently deletes every candidate ` +
+    const ok = await confirm({
+      title: "Delete job",
+      description:
+        `Permanently delete "${title}"? This also permanently deletes every candidate ` +
         `attached to this job — their resumes, AI scores, and interview history all go ` +
-        `with it. This cannot be undone.`
-    );
-    if (!confirmed) return;
+        `with it. This cannot be undone.`,
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await deleteJson<{ deleted: boolean; candidates_removed: number }>(
         `/jobs/${jobId}`,
         {}
       );
       if (result.candidates_removed > 0) {
-        alert(`Deleted "${title}" and ${result.candidates_removed} candidate(s) attached to it.`);
+        await notify({
+          title: "Job deleted",
+          description: `Deleted "${title}" and ${result.candidates_removed} candidate(s) attached to it.`,
+        });
       }
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Could not delete this job.");
+      await notify({
+        title: "Could not delete job",
+        description: err instanceof Error ? err.message : "Could not delete this job.",
+      });
     }
   }
 

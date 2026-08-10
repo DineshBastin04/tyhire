@@ -3,13 +3,16 @@
 import { useState, type FormEvent } from "react";
 import { postJson } from "@/lib/api";
 import type { Job, JobLevel, WorkMode } from "@/lib/types";
-import {
-  getScoreLabel,
-  STRICTNESS_PRESETS,
-  WEIGHT_PRESETS,
-  type StrictnessKey,
-  type WeightPresetKey,
-} from "@/lib/scoreLabel";
+import { getScoreLabel, STRICTNESS_PRESETS, type StrictnessKey } from "@/lib/scoreLabel";
+
+type WeightCategory = "skills" | "experience" | "education" | "certifications";
+
+const WEIGHT_CATEGORIES: { key: WeightCategory; label: string }[] = [
+  { key: "skills", label: "Skills" },
+  { key: "experience", label: "Experience" },
+  { key: "education", label: "Education" },
+  { key: "certifications", label: "Certifications" },
+];
 
 export interface JobPayload {
   title: string;
@@ -43,22 +46,6 @@ function matchingStrictness(approve: number, decline: number): StrictnessKey {
   return (match?.[0] as StrictnessKey) ?? "custom";
 }
 
-function matchingWeightPreset(
-  skills: number,
-  experience: number,
-  education: number,
-  certifications: number
-): WeightPresetKey {
-  const match = Object.entries(WEIGHT_PRESETS).find(
-    ([, preset]) =>
-      Math.abs(preset.skills - skills) < 0.001 &&
-      Math.abs(preset.experience - experience) < 0.001 &&
-      Math.abs(preset.education - education) < 0.001 &&
-      Math.abs(preset.certifications - certifications) < 0.001
-  );
-  return (match?.[0] as WeightPresetKey) ?? "custom";
-}
-
 /** Relative sliders, not percentages HR has to hand-balance — always scaled to sum to 1.0
  * before being sent to the API, so it's never possible to submit an invalid combination. */
 function normalizeWeights(skills: number, experience: number, education: number, certifications: number) {
@@ -72,6 +59,63 @@ function normalizeWeights(skills: number, experience: number, education: number,
     weight_education: education / total,
     weight_certifications: certifications / total,
   };
+}
+
+type Priorities = Record<WeightCategory, boolean>;
+
+const NO_PRIORITIES: Priorities = {
+  skills: false,
+  experience: false,
+  education: false,
+  certifications: false,
+};
+
+/** A checked category counts double — this exact 2:1 ratio is what already produced the
+ * old "prioritize skills"/"prioritize experience" presets (0.4 vs 0.2 base, i.e. 2:1), so
+ * checking just one box reproduces those numbers exactly; checking several splits the
+ * boost between them instead of stacking. */
+function rawUnitsFromPriorities(priorities: Priorities): Record<WeightCategory, number> {
+  return {
+    skills: priorities.skills ? 2 : 1,
+    experience: priorities.experience ? 2 : 1,
+    education: priorities.education ? 2 : 1,
+    certifications: priorities.certifications ? 2 : 1,
+  };
+}
+
+function weightsFromPriorities(priorities: Priorities) {
+  const units = rawUnitsFromPriorities(priorities);
+  return normalizeWeights(units.skills, units.experience, units.education, units.certifications);
+}
+
+/** Reverse-engineers which checkboxes (if any) would reproduce a job's already-stored
+ * weights, so editing an old job pre-checks the right boxes instead of always falling
+ * back to custom sliders. Returns null if the stored weights don't match any checkbox
+ * combination — the exact values are still preserved, just via the custom-weights sliders. */
+function matchingPriorities(
+  skills: number,
+  experience: number,
+  education: number,
+  certifications: number
+): Priorities | null {
+  for (let mask = 0; mask < 16; mask++) {
+    const candidate: Priorities = {
+      skills: !!(mask & 1),
+      experience: !!(mask & 2),
+      education: !!(mask & 4),
+      certifications: !!(mask & 8),
+    };
+    const w = weightsFromPriorities(candidate);
+    if (
+      Math.abs(w.weight_skills - skills) < 0.005 &&
+      Math.abs(w.weight_experience - experience) < 0.005 &&
+      Math.abs(w.weight_education - education) < 0.005 &&
+      Math.abs(w.weight_certifications - certifications) < 0.005
+    ) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function formatNormalizedWeights(
@@ -131,16 +175,16 @@ export default function JobForm({
   const [weightCertifications, setWeightCertifications] = useState(
     defaultValues?.weight_certifications ?? 0.25
   );
-  const [weightPreset, setWeightPreset] = useState<WeightPresetKey>(
-    defaultValues
-      ? matchingWeightPreset(
-          defaultValues.weight_skills,
-          defaultValues.weight_experience,
-          defaultValues.weight_education,
-          defaultValues.weight_certifications
-        )
-      : "balanced"
-  );
+  const initialPriorities = defaultValues
+    ? matchingPriorities(
+        defaultValues.weight_skills,
+        defaultValues.weight_experience,
+        defaultValues.weight_education,
+        defaultValues.weight_certifications
+      )
+    : NO_PRIORITIES;
+  const [priorities, setPriorities] = useState<Priorities>(initialPriorities ?? NO_PRIORITIES);
+  const [useCustomWeights, setUseCustomWeights] = useState(defaultValues ? initialPriorities === null : false);
   const [requireDesktopProbe, setRequireDesktopProbe] = useState(
     defaultValues?.require_desktop_probe ?? false
   );
@@ -164,14 +208,36 @@ export default function JobForm({
     }
   }
 
-  function handleWeightPresetChange(key: WeightPresetKey) {
-    setWeightPreset(key);
-    if (key !== "custom") {
-      const preset = WEIGHT_PRESETS[key];
-      setWeightSkills(preset.skills);
-      setWeightExperience(preset.experience);
-      setWeightEducation(preset.education);
-      setWeightCertifications(preset.certifications);
+  // Clamped so the two sliders can never cross — if they did, every candidate would land
+  // in Approved or Declined and the human-review bucket would silently disappear (triage
+  // checks approve_threshold before decline_threshold).
+  function handleApproveThresholdChange(value: number) {
+    setApproveThreshold(Math.max(value, declineThreshold + 1));
+  }
+  function handleDeclineThresholdChange(value: number) {
+    setDeclineThreshold(Math.min(value, approveThreshold - 1));
+  }
+
+  function applyWeights(w: ReturnType<typeof weightsFromPriorities>) {
+    setWeightSkills(w.weight_skills);
+    setWeightExperience(w.weight_experience);
+    setWeightEducation(w.weight_education);
+    setWeightCertifications(w.weight_certifications);
+  }
+
+  function handlePriorityToggle(category: WeightCategory) {
+    const next = { ...priorities, [category]: !priorities[category] };
+    setPriorities(next);
+    applyWeights(weightsFromPriorities(next));
+  }
+
+  function handleCustomWeightsToggle(next: boolean) {
+    setUseCustomWeights(next);
+    if (!next) {
+      // Switching back from hand-tuned sliders to checkboxes snaps the weights back to
+      // whatever the currently-checked boxes produce, rather than leaving a mismatch
+      // between "no boxes checked" and stale slider-tweaked weights.
+      applyWeights(weightsFromPriorities(priorities));
     }
   }
 
@@ -346,21 +412,29 @@ export default function JobForm({
       </div>
 
       <Field label="Fit-score priorities">
-        <select
-          value={weightPreset}
-          onChange={(e) => handleWeightPresetChange(e.target.value as WeightPresetKey)}
-          className="input"
-        >
-          {Object.entries(WEIGHT_PRESETS).map(([key, preset]) => (
-            <option key={key} value={key}>
-              {preset.label}
-            </option>
-          ))}
-          <option value="custom">Custom (advanced)</option>
-        </select>
-
-        {weightPreset === "custom" ? (
-          <div className="mt-3 space-y-3 rounded-md border border-blue-200 bg-blue-50 p-3">
+        {!useCustomWeights ? (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              {WEIGHT_CATEGORIES.map(({ key, label }) => (
+                <label key={key} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={priorities[key]}
+                    onChange={() => handlePriorityToggle(key)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-zinc-600 mt-2">
+              Check any combination to weight the AI&apos;s fit score toward it — leave every box
+              unchecked to score skills, experience, education, and certifications equally. Right
+              now that works out to:{" "}
+              {formatNormalizedWeights(weightSkills, weightExperience, weightEducation, weightCertifications)}.
+            </p>
+          </>
+        ) : (
+          <div className="space-y-3 rounded-md border border-blue-200 bg-blue-50 p-3">
             <div className="grid grid-cols-2 gap-3">
               <WeightField label="Skills" value={weightSkills} onChange={setWeightSkills} />
               <WeightField label="Experience" value={weightExperience} onChange={setWeightExperience} />
@@ -377,13 +451,14 @@ export default function JobForm({
               {formatNormalizedWeights(weightSkills, weightExperience, weightEducation, weightCertifications)}.
             </p>
           </div>
-        ) : (
-          <p className="text-xs text-zinc-600 mt-1">
-            The AI scores skills, experience, education, and certifications separately, then
-            combines them using this priority to produce the one overall fit score shown on each
-            candidate.
-          </p>
         )}
+        <button
+          type="button"
+          onClick={() => handleCustomWeightsToggle(!useCustomWeights)}
+          className="text-xs text-blue-700 underline mt-2"
+        >
+          {useCustomWeights ? "Use priority checkboxes instead" : "Fine-tune with custom weights"}
+        </button>
       </Field>
 
       <Field label="Desktop integrity monitor">
@@ -421,12 +496,12 @@ export default function JobForm({
             <SliderField
               label="Auto-approve candidates who are at least a…"
               value={approveThreshold}
-              onChange={setApproveThreshold}
+              onChange={handleApproveThresholdChange}
             />
             <SliderField
               label="Auto-decline candidates who are below a…"
               value={declineThreshold}
-              onChange={setDeclineThreshold}
+              onChange={handleDeclineThresholdChange}
             />
             <p className="text-xs text-zinc-600">
               Everyone in between lands in Review for a human to look at.

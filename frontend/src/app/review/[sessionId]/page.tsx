@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { BASE_URL, getJson, postJson } from "@/lib/api";
 import { getIntegrityScoreBand, getSeverityBand } from "@/lib/integrityLabel";
+import { useDialog } from "@/components/Dialog";
 import type { IdentityCheck, IntegrityFlag, InterviewSession, QaExchange } from "@/lib/types";
 
 const QA_VERDICT_STYLE: Record<QaExchange["verdict"], string> = {
@@ -14,6 +15,7 @@ const QA_VERDICT_STYLE: Record<QaExchange["verdict"], string> = {
 };
 
 export default function ReviewDetailPage() {
+  const { prompt } = useDialog();
   const { sessionId } = useParams<{ sessionId: string }>();
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [flags, setFlags] = useState<IntegrityFlag[]>([]);
@@ -63,16 +65,25 @@ export default function ReviewDetailPage() {
   }, [session?.transcript_status, refresh]);
 
   async function decide(flagId: string, decision: "cleared" | "confirmed_issue") {
-    const note = window.prompt("Optional note for the audit log:") ?? undefined;
-    await postJson(`/interviews/flags/${flagId}/decision`, { decision, note });
+    const note = await prompt({
+      title: "Add a note",
+      description: "Optional note for the audit log:",
+      required: false,
+    });
+    await postJson(`/interviews/flags/${flagId}/decision`, {
+      decision,
+      note: note || undefined,
+    });
     refresh();
   }
 
   async function clearIdentityCheck() {
-    const reason = window.prompt(
-      "Reason for clearing this no_match verdict as a false positive (e.g. bad lighting):"
-    );
-    if (!reason || !reason.trim()) return;
+    const reason = await prompt({
+      title: "Clear false positive",
+      description:
+        "Reason for clearing this no_match verdict as a false positive (e.g. bad lighting):",
+    });
+    if (!reason) return;
     await postJson(`/interviews/${sessionId}/identity-check/override`, { reason });
     refresh();
   }
@@ -163,7 +174,7 @@ export default function ReviewDetailPage() {
           )}
           {session.interviewer_join_token && !session.interviewer_recording_file_path && (
             <p className="text-xs text-amber-700 mt-1">
-              No interviewer recording was captured for this session — only the candidate's
+              No interviewer recording was captured for this session — only the candidate&apos;s
               side is shown above.
             </p>
           )}

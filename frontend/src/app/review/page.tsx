@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { deleteJson, getJson } from "@/lib/api";
 import { getIntegrityScoreBand } from "@/lib/integrityLabel";
+import { useDialog } from "@/components/Dialog";
 import type { InterviewSession } from "@/lib/types";
 
 export default function ReviewQueuePage() {
+  const { confirm, notify } = useDialog();
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -25,16 +27,23 @@ export default function ReviewQueuePage() {
   }, [refresh]);
 
   async function handleDelete(session: InterviewSession) {
-    const confirmed = window.confirm(
-      `Permanently delete ${session.candidate_name}'s interview session? This removes the ` +
-        `recording, transcript, and every flagged moment for good. This cannot be undone.`
-    );
-    if (!confirmed) return;
+    const ok = await confirm({
+      title: "Delete interview session",
+      description:
+        `Permanently delete ${session.candidate_name}'s interview session? This removes the ` +
+        `recording, transcript, and every flagged moment for good. This cannot be undone.`,
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteJson(`/interviews/${session.id}`, {});
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Could not delete this session.");
+      await notify({
+        title: "Could not delete session",
+        description: err instanceof Error ? err.message : "Could not delete this session.",
+      });
     }
   }
 

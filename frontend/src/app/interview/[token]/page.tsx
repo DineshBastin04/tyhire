@@ -149,7 +149,7 @@ function ConsentScreen({ onAccept }: { onAccept: () => void }) {
           This interview is recorded and monitored for integrity. We check your identity
           against a government ID, ask you to share your screen, and monitor for tab
           switching, copy/paste, fullscreen exits, and other signals during the session,
-          including face/gaze tracking run locally in your browser to detect if you're
+          including face/gaze tracking run locally in your browser to detect if you&apos;re
           reading from another screen. Your recording is also transcribed, and we analyze
           the content of your answers, your vocal tone (pacing, hesitation, energy), and
           your visible facial expression/body language as supplementary signals for the
@@ -175,10 +175,13 @@ function IdentityCheck({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [selfieBlob, setSelfieBlob] = useState<Blob | null>(null);
+  const [voiceBlob, setVoiceBlob] = useState<Blob | null>(null);
   const [livenessPassed, setLivenessPassed] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [prompt, setPrompt] = useState<"blink" | "turn_head">("turn_head");
+  const [recordingVoice, setRecordingVoice] = useState(false);
+  const [prompt] = useState<"blink" | "turn_head">("turn_head");
   const [status, setStatus] = useState<string | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
 
@@ -214,8 +217,35 @@ function IdentityCheck({
     setStatus(diff > 0.02 ? "Motion detected — liveness OK." : "No motion detected — try again.");
   }
 
+  async function recordVoiceSnippet() {
+    setRecordingVoice(true);
+    setVoiceStatus("Recording for 5 seconds... Speak now!");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        const audioBlob = new Blob(chunks, { type: "audio/wav" });
+        setVoiceBlob(audioBlob);
+        setVoiceStatus("Voice sample recorded successfully!");
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start();
+      setTimeout(() => {
+        recorder.stop();
+        setRecordingVoice(false);
+      }, 5000);
+    } catch {
+      setVoiceStatus("Microphone access is required to record voice sample.");
+      setRecordingVoice(false);
+    }
+  }
+
   async function submit() {
-    if (!idFile || !selfieBlob) return;
+    if (!idFile || !selfieBlob || !voiceBlob) return;
     setChecking(true);
     setSubmitError(null);
     try {
@@ -231,6 +261,7 @@ function IdentityCheck({
       const form = new FormData();
       form.append("id_document", idBlob, "id.jpg");
       form.append("selfie", selfieBlob, "selfie.jpg");
+      form.append("voice_enrollment", voiceBlob, "voice_enrollment.webm");
       form.append("liveness_prompt", prompt);
       form.append("liveness_passed", String(livenessPassed));
       await postForm(`/interviews/${session.id}/identity-check`, form, tokenHeader(session));
@@ -276,11 +307,31 @@ function IdentityCheck({
           {status && <span className="text-xs text-zinc-500">{status}</span>}
         </div>
 
+        <div className="border-t border-zinc-200 pt-4 space-y-2">
+          <label className="block text-sm font-medium mb-1">
+            Voice Verification: Read this sentence aloud:
+          </label>
+          <p className="bg-zinc-50 border border-zinc-200 rounded p-2 text-sm italic font-medium">
+            &ldquo;My name is {session.candidate_name} and I am ready to start my interview.&rdquo;
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={recordVoiceSnippet}
+              disabled={recordingVoice}
+              className="btn-outline disabled:opacity-40"
+            >
+              {recordingVoice ? "Recording..." : "Record voice sample (5s)"}
+            </button>
+            {voiceStatus && <span className="text-xs text-zinc-500">{voiceStatus}</span>}
+          </div>
+        </div>
+
         {submitError && <p className="text-sm text-red-600">{submitError}</p>}
 
         <button
           onClick={submit}
-          disabled={!idFile || !selfieBlob || checking}
+          disabled={!idFile || !selfieBlob || !voiceBlob || checking}
           className="btn-primary"
         >
           {checking ? "Verifying…" : "Continue"}
@@ -387,7 +438,7 @@ function ScreenShareGate({
         <h1 className="text-lg font-semibold">Share your screen</h1>
         <p className="text-sm text-zinc-600">
           Before continuing, please share your screen. Sharing your entire screen is
-          preferred — if you share only a single tab or window instead, that's noted for
+          preferred — if you share only a single tab or window instead, that&apos;s noted for
           the reviewer, not blocked.
         </p>
         {error && <p className="text-sm text-red-600">{error}</p>}
@@ -441,10 +492,18 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
           <span className="block font-medium">Waiting for the desktop monitor…</span>
           <span className="block text-sm">
             This role requires the background-app monitor to be running before the interview
-            can start. Download and run it, then this page continues automatically:
+            can start.{" "}
+            <a
+              href="/desktop-probe.js"
+              download="probe.js"
+              className="underline text-blue-700 font-medium hover:text-blue-900"
+            >
+              Download probe.js
+            </a>{" "}
+            and run it, then this page continues automatically:
           </span>
           <code className="block bg-zinc-100 rounded p-2 text-xs">
-            node probe.js --session-id {session.id}
+            node probe.js --session-id {session.id} --token {session.join_token}
           </code>
         </span>
       </Centered>
@@ -588,7 +647,14 @@ function InterviewRecorder({
     let secondFaceStreak = 0;
 
     navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
+      .getUserMedia({
+        video: {
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 15, max: 24 }
+        },
+        audio: true
+      })
       .then((s) => {
         stream = s;
         streamRef.current = s;
@@ -688,6 +754,13 @@ function InterviewRecorder({
       clearInterval(sentimentInterval);
       stream?.getTracks().forEach((t) => t.stop());
     };
+    // Intentionally keyed on session.id (a stable primitive), not the session object
+    // itself, which gets a new reference on every poll/refresh; re-running this effect on
+    // that churn would tear down and rebuild the camera/screen streams, listeners, and
+    // intervals mid-interview. pushSignal is a plain in-body function (new reference every
+    // render, not memoized) for the same reason — it always closes over the current
+    // session via the outer scope, so omitting it here doesn't make it stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, startRef]);
 
   async function finish() {
@@ -726,7 +799,7 @@ function InterviewRecorder({
         <p className="max-w-md text-sm text-red-600 text-center">{cameraError}</p>
       ) : (
         <p className="text-sm text-zinc-500">
-          Live call below — stay on this tab and answer the questions you're asked.
+          Live call below — stay on this tab and answer the questions you&apos;re asked.
         </p>
       )}
       <div className="w-full max-w-2xl h-[420px]">
@@ -740,6 +813,8 @@ function InterviewRecorder({
             webrtcApiRef.current = api;
           }}
           onMuteRequested={() => setMuteRequested(true)}
+          livekitToken={session.livekit_token}
+          livekitUrl={session.livekit_url}
         />
       </div>
       {muteRequested && (

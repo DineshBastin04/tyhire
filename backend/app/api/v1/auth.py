@@ -18,10 +18,28 @@ from app.services.auth_session import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def require_hr_auth(hr_session: str | None = Cookie(default=None)) -> dict:
+def _bcrypt_bytes(password: str) -> bytes:
+    """bcrypt raises ValueError on inputs over 72 bytes rather than truncating itself —
+    truncate here (its own documented workaround) so an oversized password on the
+    unauthenticated /auth/login endpoint is just a login attempt, never a 500."""
+    return password.encode()[:72]
+
+
+def require_hr_auth(
+    hr_session: str | None = Cookie(default=None), db: Session = Depends(get_db)
+) -> dict:
+    """Verifies the signed cookie, then re-checks the user against the DB on every
+    request — the cookie itself is stateless (signed once at login, valid until it
+    expires up to SESSION_TTL_SECONDS later) so a deleted or deactivated account's
+    cookie would otherwise keep authenticating for the rest of its lifetime."""
     identity = verify_session_cookie(hr_session)
     if not identity:
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    user = db.get(User, identity["user_id"])
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
     return identity
 
 
@@ -46,7 +64,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
     # bcrypt work roughly constant either way rather than short-circuiting on "no such user",
     # which would let a caller distinguish valid from invalid emails by response timing.
     hash_to_check = user.password_hash if user else bcrypt.gensalt().decode()
-    password_ok = bcrypt.checkpw(payload.password.encode(), hash_to_check.encode())
+    password_ok = bcrypt.checkpw(_bcrypt_bytes(payload.password), hash_to_check.encode())
 
     if not user or not user.is_active or not password_ok:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
@@ -92,7 +110,7 @@ def create_user(
 
     user = User(
         email=email,
-        password_hash=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode(),
+        password_hash=bcrypt.hashpw(_bcrypt_bytes(payload.password), bcrypt.gensalt()).decode(),
         display_name=payload.display_name,
     )
     db.add(user)

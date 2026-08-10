@@ -20,7 +20,10 @@ def _get_reader():
         return _reader
     _reader_checked = True
     if settings.geoip_db_path and os.path.exists(settings.geoip_db_path):
-        _reader = geoip2.database.Reader(settings.geoip_db_path)
+        try:
+            _reader = geoip2.database.Reader(settings.geoip_db_path)
+        except Exception:
+            _reader = None
     return _reader
 
 

@@ -40,6 +40,8 @@ class SessionOut(BaseModel):
     # per fetch, never stored) — absent everywhere else, including every HR-facing
     # endpoint, since HR never joins the call itself. See services/video_provider.py.
     ice_servers: Optional[list[dict]] = None
+    livekit_token: Optional[str] = None
+    livekit_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -55,6 +57,7 @@ class IdentityCheckOut(BaseModel):
     needs_human_review: bool
     cleared_by_hr: bool
     cleared_reason: Optional[str]
+    voice_enrollment_path: Optional[str] = None
 
     class Config:
         from_attributes = True

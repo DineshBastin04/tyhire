@@ -94,6 +94,7 @@ class IdentityCheck(Base):
     # clears these to None past the retention window while keeping the verdict/confidence.
     id_document_path = Column(String, nullable=True)
     selfie_path = Column(String, nullable=True)
+    voice_enrollment_path = Column(String, nullable=True)
     liveness_prompt = Column(String, nullable=True)  # e.g. "blink" | "turn_head"
     liveness_passed = Column(Boolean, nullable=True)
 
@@ -115,6 +116,7 @@ class SignalType(str, enum.Enum):
     copy_paste = "copy_paste"
     second_face = "second_face"
     second_voice = "second_voice"
+    voice_mismatch = "voice_mismatch"
     gaze_off_screen = "gaze_off_screen"
     excessive_motion = "excessive_motion"
     virtual_camera = "virtual_camera"

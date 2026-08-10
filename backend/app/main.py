@@ -38,6 +38,28 @@ app.include_router(api_router, prefix="/api/v1")
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+    
+    # Ensure database columns exist dynamically (lightweight migration for SQLite)
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        db.execute(text("ALTER TABLE identity_checks ADD COLUMN voice_enrollment_path VARCHAR;"))
+        db.commit()
+    except Exception:
+        pass
+
+    db.close()
+
+    # Ensure Postgres enum has 'voice_mismatch' added — ALTER TYPE ... ADD VALUE must run
+    # outside any transaction block, which SQLAlchemy only honors via
+    # Connection.execution_options(isolation_level=...); passing it on the statement itself
+    # (Executable.execution_options()) raises ArgumentError instead of applying anything.
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
+    except Exception:
+        pass
+
     _bootstrap_initial_admin()
 
 

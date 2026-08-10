@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.job import JobLevel, WorkMode
 
@@ -13,11 +13,11 @@ class JobCreate(BaseModel):
     level: JobLevel = JobLevel.experienced
     work_mode: WorkMode = WorkMode.onsite
 
-    min_years_experience: Optional[int] = None
+    min_years_experience: Optional[int] = Field(default=None, ge=0)
     allowed_locations: list[str] = []
-    max_notice_period_days: Optional[int] = None
-    salary_band_min: Optional[int] = None
-    salary_band_max: Optional[int] = None
+    max_notice_period_days: Optional[int] = Field(default=None, ge=0)
+    salary_band_min: Optional[int] = Field(default=None, ge=0)
+    salary_band_max: Optional[int] = Field(default=None, ge=0)
 
     approve_threshold: int = 75
     decline_threshold: int = 40
@@ -29,11 +29,38 @@ class JobCreate(BaseModel):
 
     require_desktop_probe: bool = False
 
+    @field_validator("title", "jd_text")
+    @classmethod
+    def _reject_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("must not be empty or whitespace-only")
+        return stripped
+
+    @model_validator(mode="after")
+    def _salary_band_ordered(self) -> "JobCreate":
+        if (
+            self.salary_band_min is not None
+            and self.salary_band_max is not None
+            and self.salary_band_min > self.salary_band_max
+        ):
+            raise ValueError("salary_band_min must not exceed salary_band_max")
+        return self
+
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> "JobCreate":
         total = self.weight_skills + self.weight_experience + self.weight_education + self.weight_certifications
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Sub-score weights must sum to 1.0 (got {total})")
+        return self
+
+    @model_validator(mode="after")
+    def _approve_above_decline(self) -> "JobCreate":
+        # triage.bucket_for_score checks approve_threshold before decline_threshold, so if
+        # approve_threshold <= decline_threshold the review bucket is unreachable — every
+        # score lands in approved or declined and no candidate ever reaches human review.
+        if self.approve_threshold <= self.decline_threshold:
+            raise ValueError("approve_threshold must be greater than decline_threshold")
         return self
 
 
@@ -53,11 +80,11 @@ class JobUpdate(BaseModel):
     level: Optional[JobLevel] = None
     work_mode: Optional[WorkMode] = None
 
-    min_years_experience: Optional[int] = None
+    min_years_experience: Optional[int] = Field(default=None, ge=0)
     allowed_locations: Optional[list[str]] = None
-    max_notice_period_days: Optional[int] = None
-    salary_band_min: Optional[int] = None
-    salary_band_max: Optional[int] = None
+    max_notice_period_days: Optional[int] = Field(default=None, ge=0)
+    salary_band_min: Optional[int] = Field(default=None, ge=0)
+    salary_band_max: Optional[int] = Field(default=None, ge=0)
 
     approve_threshold: Optional[int] = None
     decline_threshold: Optional[int] = None
@@ -68,6 +95,20 @@ class JobUpdate(BaseModel):
     weight_certifications: Optional[float] = None
 
     require_desktop_probe: Optional[bool] = None
+
+    # salary_band_min/salary_band_max ordering isn't checked here — JobUpdate's fields are
+    # all optional (partial updates), so only the final pair together (one possibly
+    # just-changed, the other carried over from the existing job) can actually be judged;
+    # see the merged-state check in jobs.py's update_job.
+    @field_validator("title", "jd_text")
+    @classmethod
+    def _reject_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("must not be empty or whitespace-only")
+        return stripped
 
 
 class JobArchiveRequest(BaseModel):

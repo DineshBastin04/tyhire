@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.candidate import Bucket
 
@@ -53,8 +53,8 @@ class DeleteRequest(BaseModel):
 
 
 class ScreeningDetailsRequest(BaseModel):
-    notice_period_days: Optional[int] = None
-    expected_salary: Optional[int] = None
+    notice_period_days: Optional[int] = Field(default=None, ge=0)
+    expected_salary: Optional[int] = Field(default=None, ge=0)
 
 
 class ManualAdjustmentRequest(BaseModel):

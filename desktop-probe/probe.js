@@ -27,6 +27,7 @@ function parseArgs() {
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--session-id") config.sessionId = args[++i];
+    else if (args[i] === "--token") config.token = args[++i];
     else if (args[i] === "--api-base") config.apiBase = args[++i];
     else if (args[i] === "--interval") config.intervalSeconds = Number(args[++i]);
     else if (args[i] === "--blocked-apps") {
@@ -34,8 +35,8 @@ function parseArgs() {
     }
   }
 
-  if (!config.sessionId) {
-    console.error("Usage: node probe.js --session-id <uuid> [--api-base <url>]");
+  if (!config.sessionId || !config.token) {
+    console.error("Usage: node probe.js --session-id <uuid> --token <token> [--api-base <url>]");
     process.exit(1);
   }
   return config;
@@ -69,7 +70,11 @@ function countDisplays() {
       const output = execSync(`powershell -NoProfile -Command "${script}"`, { encoding: "utf8" });
       return parseInt(output.trim(), 10) || 1;
     }
-    // Display enumeration on macOS/Linux isn't implemented in this POC — Windows is the
+    if (os.platform() === "darwin") {
+      const output = execSync("system_profiler SPDisplaysDataType | grep -c 'Resolution'", { encoding: "utf8" });
+      return parseInt(output.trim(), 10) || 1;
+    }
+    // Display enumeration on Linux isn't implemented in this POC — Windows is the
     // primary target here. Reporting 1 avoids false external-display flags on those platforms.
     return 1;
   } catch (err) {
@@ -78,10 +83,14 @@ function countDisplays() {
   }
 }
 
-async function post(url, body) {
+async function post(url, body, token) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) {
+    headers["X-Interview-Token"] = token;
+  }
   return fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -111,14 +120,14 @@ async function tick(config, startedAt) {
   }
 
   if (events.length > 0) {
-    const res = await post(`${config.apiBase}/interviews/${config.sessionId}/signals`, events);
+    const res = await post(`${config.apiBase}/interviews/${config.sessionId}/signals`, events, config.token);
     console.log(
       `[probe] ${new Date().toISOString()} reported ${events.length} signal(s) ` +
         `(${events.map((e) => e.signal_type).join(", ")}) -> HTTP ${res.status}`
     );
   }
 
-  const heartbeat = await post(`${config.apiBase}/interviews/${config.sessionId}/probe-heartbeat`, {});
+  const heartbeat = await post(`${config.apiBase}/interviews/${config.sessionId}/probe-heartbeat`, {}, config.token);
   console.log(`[probe] ${new Date().toISOString()} heartbeat -> HTTP ${heartbeat.status}`);
 }
 

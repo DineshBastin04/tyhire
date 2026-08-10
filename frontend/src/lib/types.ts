@@ -106,6 +106,8 @@ export interface InterviewSession {
   interviewer_live_decision: "proceed" | "concern" | "reject" | null;
   interviewer_live_notes: string | null;
   ice_servers: IceServer[] | null;
+  livekit_token: string | null;
+  livekit_url: string | null;
 }
 
 export interface IceServer {
@@ -168,6 +170,7 @@ export type SignalType =
   | "copy_paste"
   | "second_face"
   | "second_voice"
+  | "voice_mismatch"
   | "gaze_off_screen"
   | "excessive_motion"
   | "virtual_camera"

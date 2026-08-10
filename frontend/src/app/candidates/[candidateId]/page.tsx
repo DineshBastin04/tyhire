@@ -6,11 +6,13 @@ import { useCallback, useEffect, useState } from "react";
 import { BASE_URL, deleteJson, getJson, postJson } from "@/lib/api";
 import { getIntegrityScoreBand } from "@/lib/integrityLabel";
 import { getScoreLabel } from "@/lib/scoreLabel";
+import { useDialog } from "@/components/Dialog";
 import type { Bucket, Candidate, InterviewSession } from "@/lib/types";
 
 const CATEGORIES = ["skills", "experience", "education", "certifications"] as const;
 
 export default function CandidateDetailPage() {
+  const { prompt } = useDialog();
   const { candidateId } = useParams<{ candidateId: string }>();
   const router = useRouter();
   const [candidate, setCandidate] = useState<Candidate | null>(null);
@@ -60,13 +62,16 @@ export default function CandidateDetailPage() {
   }
 
   async function handleHardDelete(name: string) {
-    const reason = window.prompt(
-      `Permanently delete ${name}? This cannot be undone — the resume, AI score, and history ` +
-        `will be gone for good. Enter a reason for the audit log to proceed:`
-    );
-    if (!reason || !reason.trim()) return;
-    if (!window.confirm(`Really permanently delete ${name}? This cannot be undone.`)) return;
-    if (!candidate) return;
+    const reason = await prompt({
+      title: "Delete permanently",
+      description:
+        `Permanently delete ${name}? This cannot be undone — the resume, AI score, and ` +
+        `history will be gone for good. Enter a reason for the audit log to proceed:`,
+      placeholder: "Reason for deletion",
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!reason || !candidate) return;
     await deleteJson(`/candidates/${candidateId}`, { reason });
     router.push(`/jobs/${candidate.job_id}`);
   }
@@ -278,14 +283,12 @@ export default function CandidateDetailPage() {
         )}
       </Section>
 
-      {candidate.archived && (
-        <button
-          onClick={() => handleHardDelete(candidate.full_name ?? candidate.email ?? "this candidate")}
-          className="btn-danger-outline text-xs px-2 py-1"
-        >
-          Delete permanently
-        </button>
-      )}
+      <button
+        onClick={() => handleHardDelete(candidate.full_name ?? candidate.email ?? "this candidate")}
+        className="btn-danger-outline text-xs px-2 py-1"
+      >
+        Delete permanently
+      </button>
     </div>
   );
 }

@@ -5,6 +5,13 @@ standalone alarm, but several signals clustered in the same window should. See r
 """
 from app.models.interview import SignalEvent, SignalType
 
+try:
+    import numpy as np
+    from sklearn.ensemble import IsolationForest
+    HAS_ML = True
+except ImportError:
+    HAS_ML = False
+
 CLUSTER_WINDOW_MS = 5000
 
 # A lone occurrence of these is common/benign; they only matter when they cluster with something else.
@@ -35,6 +42,34 @@ def fuse_signals(events: list[SignalEvent]) -> list[dict]:
             current = [event]
     clusters.append(current)
 
+    # Train a dynamic unsupervised IsolationForest on the signal baseline to detect anomalies
+    ml_model = None
+    if HAS_ML and len(clusters) > 0:
+        try:
+            baseline = []
+            # Generate representative benign clusters
+            for _ in range(50):
+                baseline.append([0.0, 1, 1.0, 1.0])  # single minor signal
+            for _ in range(30):
+                baseline.append([1.0, 1, 2.0, 2.0])  # brief blur
+            for _ in range(20):
+                baseline.append([2.0, 1, 3.0, 3.0])  # gaze offset
+            
+            # Incorporate session clusters into training pool
+            for cluster in clusters:
+                distinct_types = {e.signal_type for e in cluster}
+                base_severity = sum(e.weight for e in cluster)
+                duration_s = (cluster[-1].session_offset_ms - cluster[0].session_offset_ms) / 1000.0
+                max_w = max(e.weight for e in cluster) if cluster else 0
+                baseline.append([duration_s, len(distinct_types), base_severity, max_w])
+
+            X = np.array(baseline)
+            ml_model = IsolationForest(n_estimators=100, contamination=0.1, random_state=42)
+            ml_model.fit(X)
+        except Exception as exc:
+            print(f"[integrity] ML Initialization failed: {exc}")
+            ml_model = None
+
     flags = []
     for cluster in clusters:
         distinct_types = {e.signal_type for e in cluster}
@@ -47,10 +82,27 @@ def fuse_signals(events: list[SignalEvent]) -> list[dict]:
         # Multiple distinct signal types together compound severity — this is the fusion.
         severity = base_severity * (1 + 0.5 * (len(distinct_types) - 1))
 
+        is_ml_anomaly = False
+        if ml_model:
+            try:
+                duration_s = (cluster[-1].session_offset_ms - cluster[0].session_offset_ms) / 1000.0
+                max_w = max(e.weight for e in cluster)
+                features = np.array([[duration_s, len(distinct_types), base_severity, max_w]])
+                prediction = ml_model.predict(features)
+                if prediction[0] == -1:
+                    is_ml_anomaly = True
+                    severity = severity * 1.5
+            except Exception:
+                pass
+
+        summary = _summarize(distinct_types, cluster)
+        if is_ml_anomaly:
+            summary += " [ML Anomaly]"
+
         flags.append({
             "session_offset_ms": cluster[0].session_offset_ms,
             "severity": round(severity, 2),
-            "summary": _summarize(distinct_types, cluster),
+            "summary": summary,
             "contributing_signal_ids": [str(e.id) for e in cluster],
         })
 
@@ -64,6 +116,7 @@ def _summarize(distinct_types: set[SignalType], cluster: list[SignalEvent]) -> s
         SignalType.copy_paste: "Copy/paste",
         SignalType.second_face: "Second face detected",
         SignalType.second_voice: "Second voice detected",
+        SignalType.voice_mismatch: "Voice mismatch detected",
         SignalType.gaze_off_screen: "Gaze off-screen",
         SignalType.excessive_motion: "Excessive motion",
         SignalType.virtual_camera: "Virtual camera signature",

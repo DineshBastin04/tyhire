@@ -3,6 +3,10 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+import shutil
+import subprocess
+import tempfile
 
 from fastapi import (
     APIRouter,
@@ -54,6 +58,7 @@ from app.services.transcript_merge import merge_transcripts
 from app.services.transcription import transcribe_with_segments
 from app.services.video_extract import extract_frames
 from app.services.voice_tone import analyze_voice_tone
+from app.services.livekit_service import generate_livekit_token
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -311,6 +316,14 @@ def get_session_by_token(join_token: str, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired interview link")
     session.ice_servers = video_provider.get_ice_servers()
+
+    # Generate LiveKit token if configured
+    room_id = video_provider.get_room_id(session)
+    lk_token = generate_livekit_token(room_name=room_id, identity="candidate", name=session.candidate_name)
+    if lk_token:
+        session.livekit_token = lk_token
+        session.livekit_url = settings.livekit_url
+
     return session
 
 
@@ -321,6 +334,7 @@ async def submit_identity_check(
     selfie: UploadFile,
     liveness_prompt: str = Form(...),
     liveness_passed: bool = Form(...),
+    voice_enrollment: Optional[UploadFile] = None,
     session: InterviewSession = Depends(require_session_token),
     db: Session = Depends(get_db),
 ):
@@ -329,6 +343,11 @@ async def submit_identity_check(
 
     id_path = storage.save_file(f"interviews/{session.id}", id_document.filename, id_bytes)
     selfie_path = storage.save_file(f"interviews/{session.id}", selfie.filename, selfie_bytes)
+
+    voice_path = None
+    if voice_enrollment:
+        voice_bytes = await voice_enrollment.read()
+        voice_path = storage.save_file(f"interviews/{session.id}", voice_enrollment.filename, voice_bytes)
 
     match = check_identity_match(
         id_bytes, id_document.content_type or "image/jpeg",
@@ -339,6 +358,7 @@ async def submit_identity_check(
         session_id=session.id,
         id_document_path=id_path,
         selfie_path=selfie_path,
+        voice_enrollment_path=voice_path,
         liveness_prompt=liveness_prompt,
         liveness_passed=liveness_passed,
         match_confidence=match["confidence"],
@@ -540,6 +560,14 @@ def get_session_by_interviewer_token(interviewer_token: str, db: Session = Depen
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired interviewer link")
     session.ice_servers = video_provider.get_ice_servers()
+
+    # Generate LiveKit token if configured
+    room_id = video_provider.get_room_id(session)
+    lk_token = generate_livekit_token(room_name=room_id, identity="interviewer", name="Interviewer")
+    if lk_token:
+        session.livekit_token = lk_token
+        session.livekit_url = settings.livekit_url
+
     return session
 
 
@@ -686,6 +714,39 @@ def _process_recordings_and_save(session_id: uuid.UUID):
             session.transcript = text
             session.transcript_status = "done"
             candidate_segments = segments
+
+            # Voiceprint Match Check
+            identity_check = (
+                db.query(IdentityCheck)
+                .filter(IdentityCheck.session_id == session.id)
+                .order_by(IdentityCheck.created_at.desc())
+                .first()
+            )
+            if identity_check and identity_check.voice_enrollment_path and candidate_wav_path:
+                try:
+                    from app.services.voice_verification import verify_voice_match
+                    voice_result = verify_voice_match(identity_check.voice_enrollment_path, candidate_wav_path)
+                    if not voice_result.get("match", True):
+                        db.add(SignalEvent(
+                            session_id=session.id,
+                            signal_type=SignalType.voice_mismatch,
+                            session_offset_ms=10000,
+                            weight=9,
+                            meta={"confidence": voice_result.get("confidence"), "reason": voice_result.get("reason")}
+                        ))
+                        db.commit()
+
+                        # Recompute integrity scores and flags
+                        events = db.query(SignalEvent).filter(SignalEvent.session_id == session.id).all()
+                        db.query(IntegrityFlag).filter(IntegrityFlag.session_id == session.id).delete()
+                        flags = integrity.fuse_signals(events)
+                        for flag in flags:
+                            db.add(IntegrityFlag(session_id=session.id, **flag))
+                        score, needs_review = integrity.compute_integrity_score(flags)
+                        session.integrity_score = score
+                        session.integrity_needs_review = needs_review
+                except Exception as exc:
+                    print(f"[post-processing] Voice verification failed: {exc}")
         except Exception as exc:  # noqa: BLE001 - surfaced on the review page, not silently dropped
             session.transcript = f"Transcription failed: {exc}"
             session.transcript_status = "failed"
@@ -739,6 +800,30 @@ def _process_recordings_and_save(session_id: uuid.UUID):
         db.close()
 
 
+def _repair_webm_container(relative_path: str) -> None:
+    """Invokes ffmpeg with -c copy to re-index the WebM container and repair missing cues
+    or metadata headers caused by abrupt stream terminations / interrupted recordings."""
+    full_path = storage.absolute_path(relative_path)
+    if not os.path.exists(full_path):
+        return
+
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        temp_out = tmp.name
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-err_detect", "ignore_err", "-i", full_path, "-c", "copy", temp_out],
+            check=True,
+            capture_output=True,
+        )
+        shutil.move(temp_out, full_path)
+    except Exception as exc:
+        print(f"[storage] could not repair WebM container {relative_path}: {exc}")
+        if os.path.exists(temp_out):
+            with contextlib.suppress(OSError):
+                os.remove(temp_out)
+
+
 @router.post("/{session_id}/complete", response_model=SessionOut)
 def complete_session(
     background_tasks: BackgroundTasks,
@@ -763,6 +848,14 @@ def complete_session(
 
     if session.recording_file_path:
         session.transcript_status = "pending"
+        # Encrypted here, once, now that the file is finished growing — append_file_chunk
+        # can't encrypt incrementally (see storage.py). The background task decrypts to a
+        # temp copy on demand for ffmpeg/whisper.
+        # Repair unfinalized/corrupted WebM chunks using ffmpeg prior to encryption
+        _repair_webm_container(session.recording_file_path)
+        if session.interviewer_recording_file_path:
+            _repair_webm_container(session.interviewer_recording_file_path)
+
         # Encrypted here, once, now that the file is finished growing — append_file_chunk
         # can't encrypt incrementally (see storage.py). The background task decrypts to a
         # temp copy on demand for ffmpeg/whisper.

@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { BASE_URL } from "@/lib/api";
 import type { IceServer } from "@/lib/types";
+import { LiveKitRoom, RoomAudioRenderer, useTracks, VideoTrack } from "@livekit/components-react";
+import { Track, Room } from "livekit-client";
 
 export interface WebRTCApi {
   /** Toggles the local mic; returns the new muted state. */
@@ -17,25 +19,27 @@ export interface WebRTCApi {
 
 interface WebRTCRoomProps {
   sessionId: string;
-  /** join_token or interviewer_join_token, matching `role`. */
   token: string;
   role: "candidate" | "interviewer";
   iceServers: IceServer[] | null;
-  /** Already-captured screen-share track (if any), added in the same batch as the
-   * camera/mic tracks so the connection only negotiates once. Adding it via a separate
-   * renegotiation a moment later — even just a tick later — is what caused Chrome's
-   * "BUNDLE group codec collision" error: two back-to-back renegotiations each adding a
-   * new video m-line confuses its header-extension-id assignment. */
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
-  /** Fired on the candidate's side when the interviewer clicks "request mute". */
   onMuteRequested?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
+  livekitToken?: string | null;
+  livekitUrl?: string | null;
 }
 
 function wsBaseUrl(): string {
   if (BASE_URL.startsWith("http")) return BASE_URL.replace(/^http/, "ws");
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  
+  // In local development, the Next.js dev server (port 3000) does not proxy WebSocket upgrades.
+  // Bypass it and connect directly to the FastAPI backend running on port 8000.
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    return `${proto}//${window.location.hostname}:8000${BASE_URL}`;
+  }
+  
   return `${proto}//${window.location.host}${BASE_URL}`;
 }
 
@@ -50,7 +54,24 @@ export default function WebRTCRoom({
   onApiReady,
   onMuteRequested,
   onPeerConnectedChange,
+  livekitToken,
+  livekitUrl,
 }: WebRTCRoomProps) {
+  if (livekitToken && livekitUrl) {
+    return (
+      <LiveKitRoomRenderer
+        sessionId={sessionId}
+        token={livekitToken}
+        role={role}
+        url={livekitUrl}
+        extraVideoTrack={extraVideoTrack}
+        onApiReady={onApiReady}
+        onMuteRequested={onMuteRequested}
+        onPeerConnectedChange={onPeerConnectedChange}
+      />
+    );
+  }
+
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteScreenRef = useRef<HTMLVideoElement>(null);
@@ -91,7 +112,14 @@ export default function WebRTCRoom({
     }
 
     async function start() {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 15, max: 24 }
+        },
+        audio: true
+      });
       if (cancelled) {
         localStream.getTracks().forEach((t) => t.stop());
         return;
@@ -246,5 +274,132 @@ export default function WebRTCRoom({
         className="absolute bottom-2 right-2 w-28 h-20 rounded border border-white/30 object-cover"
       />
     </div>
+  );
+}
+
+function LiveKitRoomRenderer({
+  sessionId,
+  token,
+  role,
+  url,
+  extraVideoTrack,
+  onApiReady,
+  onMuteRequested,
+  onPeerConnectedChange,
+}: {
+  sessionId: string;
+  token: string;
+  role: "candidate" | "interviewer";
+  url: string;
+  extraVideoTrack?: MediaStreamTrack | null;
+  onApiReady?: (api: WebRTCApi) => void;
+  onMuteRequested?: () => void;
+  onPeerConnectedChange?: (connected: boolean) => void;
+}) {
+  const room = useMemo(() => new Room(), []);
+
+  const cameraTracks = useTracks([Track.Source.Camera]);
+  const screenTracks = useTracks([Track.Source.ScreenShare]);
+
+  const localCamera = cameraTracks.find((t) => t.participant.isLocal);
+  const remoteCamera = cameraTracks.find((t) => !t.participant.isLocal);
+  const remoteScreen = screenTracks.find((t) => !t.participant.isLocal);
+
+  const peerPresent = cameraTracks.length > 1;
+
+  useEffect(() => {
+    onPeerConnectedChange?.(peerPresent);
+  }, [peerPresent, onPeerConnectedChange]);
+
+  // Publish screen-share track if available and room is connected
+  useEffect(() => {
+    if (extraVideoTrack && room.state === "connected") {
+      room.localParticipant.publishTrack(extraVideoTrack).catch((err) => {
+        console.error("failed to publish extra video track", err);
+      });
+    }
+  }, [extraVideoTrack, room, room.state]);
+
+  useEffect(() => {
+    if (onApiReady) {
+      onApiReady({
+        toggleMic: () => {
+          const isEnabled = room.localParticipant.isMicrophoneEnabled;
+          room.localParticipant.setMicrophoneEnabled(!isEnabled);
+          return isEnabled;
+        },
+        toggleCamera: () => {
+          const isEnabled = room.localParticipant.isCameraEnabled;
+          room.localParticipant.setCameraEnabled(!isEnabled);
+          return isEnabled;
+        },
+        requestPeerMute: () => {
+          const encoder = new TextEncoder();
+          room.localParticipant.publishData(
+            encoder.encode(JSON.stringify({ type: "mute-request" })),
+            { reliable: true }
+          ).catch((err) => console.error("failed to publish data", err));
+        },
+      });
+    }
+  }, [onApiReady, room]);
+
+  useEffect(() => {
+    const handleData = (payload: Uint8Array) => {
+      try {
+        const decoder = new TextDecoder();
+        const msg = JSON.parse(decoder.decode(payload));
+        if (msg.type === "mute-request") {
+          onMuteRequested?.();
+        }
+      } catch (err) {
+        console.error("failed to parse LiveKit data message", err);
+      }
+    };
+
+    room.on("dataReceived", handleData);
+    return () => {
+      room.off("dataReceived", handleData);
+    };
+  }, [onMuteRequested, room]);
+
+  return (
+    <LiveKitRoom
+      room={room}
+      serverUrl={url}
+      token={token}
+      connect={true}
+      video={true}
+      audio={true}
+      className="relative w-full h-full min-h-[360px] rounded-md bg-black overflow-hidden"
+    >
+      <RoomAudioRenderer />
+      {!peerPresent && (
+        <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
+          Waiting for the other participant to join…
+        </p>
+      )}
+
+      {remoteCamera && (
+        <VideoTrack
+          trackRef={remoteCamera}
+          className="w-full h-full object-contain"
+        />
+      )}
+
+      {remoteScreen && (
+        <VideoTrack
+          trackRef={remoteScreen}
+          className="absolute inset-0 w-full h-full object-contain bg-black"
+        />
+      )}
+
+      {localCamera && (
+        <VideoTrack
+          trackRef={localCamera}
+          className="absolute bottom-2 right-2 w-28 h-20 rounded border border-white/30 object-cover"
+        />
+      )}
+    </LiveKitRoom>
   );
 }

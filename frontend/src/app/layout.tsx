@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import SiteHeader from "@/components/SiteHeader";
+import { DialogProvider } from "@/components/Dialog";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -35,8 +36,10 @@ export default function RootLayout({
           this app and isn't fixable from our side. Scoped to just these two tags so real
           hydration mismatches anywhere else in the app still surface normally. */}
       <body className="min-h-full flex flex-col bg-white" suppressHydrationWarning>
-        <SiteHeader />
-        <main className="flex-1 flex flex-col">{children}</main>
+        <DialogProvider>
+          <SiteHeader />
+          <main className="flex-1 flex flex-col">{children}</main>
+        </DialogProvider>
       </body>
     </html>
   );

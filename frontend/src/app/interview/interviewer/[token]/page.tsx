@@ -18,6 +18,7 @@ const SIGNAL_LABELS: Record<SignalType, string> = {
   copy_paste: "Copy/paste",
   second_face: "Second face detected",
   second_voice: "Second voice detected",
+  voice_mismatch: "Voice mismatch detected",
   gaze_off_screen: "Gaze off-screen",
   excessive_motion: "Excessive motion",
   virtual_camera: "Virtual camera signature",
@@ -199,8 +200,8 @@ export default function InterviewerCapturePage() {
       <div className="max-w-2xl w-full space-y-4 text-center">
         <h1 className="text-lg font-semibold">Interviewer</h1>
         <p className="text-sm text-zinc-600">
-          You're conducting the interview for <strong>{session.candidate_name}</strong> —
-          join the call below to talk to and see them. Once you're ready to begin, click
+          You&apos;re conducting the interview for <strong>{session.candidate_name}</strong> —
+          join the call below to talk to and see them. Once you&apos;re ready to begin, click
           Start recording — that captures only your side of the conversation, so questions
           and answers can be cross-checked afterward.
         </p>
@@ -218,6 +219,8 @@ export default function InterviewerCapturePage() {
                 onApiReady={(api) => {
                   webrtcApiRef.current = api;
                 }}
+                livekitToken={session.livekit_token}
+                livekitUrl={session.livekit_url}
               />
             </div>
 

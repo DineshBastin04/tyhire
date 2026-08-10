@@ -10,38 +10,62 @@ services:
     command: >
       -n
       --listening-port=3478
+      --min-port=49160
+      --max-port=49200
       --realm=${TURN_DOMAIN:-localhost}
       --use-auth-secret
-      --static-auth-secret=${TURN_SECRET:-dev-turn-secret-change-me}
+      --static-auth-secret=${TURN_SECRET:?Set TURN_SECRET in .env (e.g. openssl rand -hex 32) — must match the backend's TURN_SECRET}
       --no-cli
     ports:
       - "3478:3478"
       - "3478:3478/udp"
       - "49160-49200:49160-49200/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3478 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: hr_tool
-      POSTGRES_PASSWORD: hr_tool
-      POSTGRES_DB: hr_tool
+      # No defaults: this container's port is published to the host below, so a guessable
+      # user/password pair here would be a remotely-reachable, well-known DB credential.
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build: ./backend
     restart: unless-stopped
+    # Plain `depends_on: [postgres, coturn]` only orders container *start*, not readiness —
+    # postgres:16-alpine takes a few seconds to init its data directory on a cold start
+    # (first-ever `docker compose up`, or after a volume wipe), and the backend hits the DB
+    # unconditionally in its FastAPI startup event (Base.metadata.create_all, then the
+    # initial-admin bootstrap) before it can serve a single request. Without waiting for
+    # postgres's own healthcheck, that connection fails, the container exits, and
+    # `restart: unless-stopped` just keeps retrying — a crash loop until postgres happens to
+    # win the race on its own.
     depends_on:
-      - postgres
-      - coturn
+      postgres:
+        condition: service_healthy
+      coturn:
+        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://hr_tool:hr_tool@postgres:5432/hr_tool
+      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
-      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env (e.g. openssl rand -hex 32)}
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
@@ -52,7 +76,7 @@ services:
       # Must match the coturn service's own TURN_SECRET above exactly — this is what lets
       # our backend mint short-lived TURN credentials coturn will accept.
       TURN_DOMAIN: ${TURN_DOMAIN:-localhost}
-      TURN_SECRET: ${TURN_SECRET:-dev-turn-secret-change-me}
+      TURN_SECRET: ${TURN_SECRET:?Set TURN_SECRET in .env (e.g. openssl rand -hex 32) — must match coturn's TURN_SECRET}
       # Phase 4 — blank until you create these yourself (Google Cloud OAuth client /
       # Microsoft Entra app registration); sign-in buttons simply won't work until set.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -66,6 +90,25 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./storage:/storage
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # Relative, not absolute — the browser only ever talks to this container's own
+      # origin (:3000); next.config.ts's rewrites() then proxies /api/v1 and /media
+      # server-side to the backend, so BACKEND_INTERNAL_URL (below) is what actually needs
+      # to resolve on the compose network, not this one.
+      NEXT_PUBLIC_API_BASE_URL: /api/v1
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
 
 volumes:
   pgdata:

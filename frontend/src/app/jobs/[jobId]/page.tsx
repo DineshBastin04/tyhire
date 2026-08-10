@@ -6,6 +6,7 @@ import Link from "next/link";
 import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
 import { getScoreLabel } from "@/lib/scoreLabel";
 import JobForm, { type JobPayload } from "@/components/JobForm";
+import { useDialog } from "@/components/Dialog";
 import type { Bucket, Candidate, Job } from "@/lib/types";
 
 const BUCKET_LABELS: Record<Bucket, string> = {
@@ -21,6 +22,7 @@ const BUCKET_COLORS: Record<Bucket, string> = {
 };
 
 export default function JobDetailPage() {
+  const { prompt } = useDialog();
   const { jobId } = useParams<{ jobId: string }>();
   const [job, setJob] = useState<Job | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -67,12 +69,16 @@ export default function JobDetailPage() {
   }
 
   async function handleHardDelete(candidateId: string, name: string) {
-    const reason = window.prompt(
-      `Permanently delete ${name}? This cannot be undone — the resume, AI score, and history ` +
-        `will be gone for good. Enter a reason for the audit log to proceed:`
-    );
-    if (!reason || !reason.trim()) return;
-    if (!window.confirm(`Really permanently delete ${name}? This cannot be undone.`)) return;
+    const reason = await prompt({
+      title: "Delete permanently",
+      description:
+        `Permanently delete ${name}? This cannot be undone — the resume, AI score, and ` +
+        `history will be gone for good. Enter a reason for the audit log to proceed:`,
+      placeholder: "Reason for deletion",
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!reason) return;
 
     await deleteJson(`/candidates/${candidateId}`, { reason });
     refresh();
@@ -88,9 +94,9 @@ export default function JobDetailPage() {
     return (
       <div className="max-w-lg mx-auto w-full px-6 py-8 text-center space-y-3">
         <p className="text-zinc-700">This job no longer exists.</p>
-        <a href="/jobs" className="btn-outline inline-flex">
+        <Link href="/jobs" className="btn-outline inline-flex">
           Back to jobs
-        </a>
+        </Link>
       </div>
     );
   }
@@ -115,7 +121,7 @@ export default function JobDetailPage() {
           />
         </div>
       ) : (
-        <div className="flex items-start justify-between">
+        <div className="flex items-center justify-between">
           <div>
             <h1 className="text-xl font-semibold">{job.title}</h1>
             <p className="text-sm text-zinc-500">

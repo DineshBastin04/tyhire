@@ -24,9 +24,21 @@ router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_
 
 
 @router.post("", response_model=JobOut)
-def create_job(payload: JobCreate, db: Session = Depends(get_db)):
+def create_job(
+    payload: JobCreate,
+    db: Session = Depends(get_db),
+    current_hr_user: dict = Depends(require_hr_auth),
+):
     job = Job(**payload.model_dump())
     db.add(job)
+    db.flush()  # assigns job.id, so the audit log below can reference it
+
+    db.add(AuditLog(
+        actor=f"hr:{current_hr_user['email']}",
+        action="create_job",
+        detail={"job_id": str(job.id), "title": job.title},
+    ))
+
     db.commit()
     db.refresh(job)
     return job
@@ -34,7 +46,13 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
 
 @router.post("/suggest", response_model=JobSuggestResponse)
 def suggest_job(payload: JobSuggestRequest):
-    return suggest_job_description(payload.title, payload.draft_jd_text)
+    try:
+        return suggest_job_description(payload.title, payload.draft_jd_text)
+    except Exception as exc:  # noqa: BLE001 - OpenAI errors, a missing tool call, bad JSON, etc.
+        raise HTTPException(
+            status_code=502,
+            detail="Could not generate a job description suggestion right now — try again in a moment.",
+        ) from exc
 
 
 @router.get("", response_model=list[JobOut])
@@ -51,15 +69,58 @@ def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.patch("/{job_id}", response_model=JobOut)
-def update_job(job_id: uuid.UUID, payload: JobUpdate, db: Session = Depends(get_db)):
+def update_job(
+    job_id: uuid.UUID,
+    payload: JobUpdate,
+    db: Session = Depends(get_db),
+    current_hr_user: dict = Depends(require_hr_auth),
+):
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.archived:
+        raise HTTPException(status_code=400, detail="Job is archived and can't be edited — unarchive it first.")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changed_fields = payload.model_dump(exclude_unset=True)
+    for field, value in changed_fields.items():
         setattr(job, field, value)
 
+    # Checked against the merged result rather than in JobUpdate itself — its fields are
+    # all optional (partial updates), so only the final approve/decline pair together (one
+    # possibly just-changed, the other carried over from the existing job) tells us whether
+    # the review bucket in triage.bucket_for_score is still reachable.
+    if job.approve_threshold <= job.decline_threshold:
+        raise HTTPException(
+            status_code=400, detail="approve_threshold must be greater than decline_threshold"
+        )
+
+    # Same reasoning, mirroring JobCreate's _salary_band_ordered.
+    if (
+        job.salary_band_min is not None
+        and job.salary_band_max is not None
+        and job.salary_band_min > job.salary_band_max
+    ):
+        raise HTTPException(status_code=400, detail="salary_band_min must not exceed salary_band_max")
+
+    # Same reasoning as above, mirroring JobCreate's _weights_sum_to_one — a partial update
+    # touching only one weight field would otherwise leave the other three (carried over
+    # from the existing job) summing to something scoring.score_candidate never expected.
+    weight_total = (
+        job.weight_skills + job.weight_experience + job.weight_education + job.weight_certifications
+    )
+    if abs(weight_total - 1.0) > 0.01:
+        raise HTTPException(
+            status_code=400, detail=f"Sub-score weights must sum to 1.0 (got {weight_total})"
+        )
+
     db.add(job)
+
+    db.add(AuditLog(
+        actor=f"hr:{current_hr_user['email']}",
+        action="update_job",
+        detail={"job_id": str(job_id), "changed_fields": changed_fields},
+    ))
+
     db.commit()
     db.refresh(job)
     return job

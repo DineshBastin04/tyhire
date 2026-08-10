@@ -17,7 +17,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # self-register as HR.
 oauth = OAuth()
 
-if settings.google_client_id and settings.google_client_secret:
+# A provider is only registered — and only then usable — once BOTH its id and secret are
+# set. The /login routes below must gate on these same two flags (not just client_id) or a
+# half-configured provider (id set, secret still blank) passes the gate but was never
+# actually registered, and accessing oauth.<provider> then raises AttributeError.
+GOOGLE_CONFIGURED = bool(settings.google_client_id and settings.google_client_secret)
+MICROSOFT_CONFIGURED = bool(settings.microsoft_client_id and settings.microsoft_client_secret)
+
+if GOOGLE_CONFIGURED:
     oauth.register(
         name="google",
         client_id=settings.google_client_id,
@@ -26,7 +33,7 @@ if settings.google_client_id and settings.google_client_secret:
         client_kwargs={"scope": "openid email profile"},
     )
 
-if settings.microsoft_client_id and settings.microsoft_client_secret:
+if MICROSOFT_CONFIGURED:
     oauth.register(
         name="microsoft",
         client_id=settings.microsoft_client_id,
@@ -48,20 +55,25 @@ def _unconfigured(provider: str) -> RedirectResponse:
 
 @router.get("/google/login")
 async def google_login(request: Request):
-    if not settings.google_client_id:
+    if not GOOGLE_CONFIGURED:
         return _unconfigured("google")
     return await oauth.google.authorize_redirect(request, _redirect_uri("google"))
 
 
 @router.get("/microsoft/login")
 async def microsoft_login(request: Request):
-    if not settings.microsoft_client_id:
+    if not MICROSOFT_CONFIGURED:
         return _unconfigured("microsoft")
     return await oauth.microsoft.authorize_redirect(request, _redirect_uri("microsoft"))
 
 
 async def _handle_callback(request: Request, provider: str, db: Session) -> RedirectResponse:
     client = oauth.create_client(provider)
+    if client is None:
+        # Provider never registered (not configured, or someone hits the callback URL
+        # directly without going through /login first) — create_client returns None here
+        # rather than raising, so this must be checked explicitly before use.
+        return _unconfigured(provider)
     token = await client.authorize_access_token(request)
     userinfo = token.get("userinfo") or {}
     email = (userinfo.get("email") or "").strip().lower()

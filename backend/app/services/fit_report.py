@@ -27,7 +27,14 @@ _CHAR_REPLACEMENTS = {
 def _sanitize(text: str) -> str:
     for original, replacement in _CHAR_REPLACEMENTS.items():
         text = text.replace(original, replacement)
-    return text.encode("latin-1", "replace").decode("latin-1")
+    # Latin-1 covers exactly code points 0-255 — anything past that (CJK, emoji, etc.)
+    # would otherwise be silently swapped for a bare "?" by the encode() below with no
+    # sign anything was dropped. Flag it visibly instead.
+    if any(ord(ch) > 255 for ch in text):
+        text = text.encode("latin-1", "replace").decode("latin-1")
+        text += " [some characters could not be displayed]"
+        return text
+    return text
 
 
 def _score_label(score: float) -> str:

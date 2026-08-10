@@ -3,7 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.v1.auth import require_hr_auth
 from app.db.session import get_db
@@ -28,6 +28,20 @@ router = APIRouter(tags=["candidates"], dependencies=[Depends(require_hr_auth)])
 MANUAL_ADJUSTMENT_LIMIT = 20
 
 
+def _matches_declared_type(filename: str, content: bytes) -> bool:
+    """Sniffs magic bytes against the file's own extension — a renamed non-resume file
+    (some_photo.jpg saved as resume.pdf, say) would otherwise sail past extract_text's
+    extension check straight into real parsing/OCR, burning an actual OpenAI call on
+    content that was never a resume. Anything outside pdf/docx falls through to
+    extract_text's own plain-text path and isn't sniffed here."""
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        return content.startswith(b"%PDF-")
+    if lower.endswith(".docx"):
+        return content.startswith(b"PK\x03\x04")
+    return True
+
+
 def _apply_bucket_from_score(candidate: Candidate, job: Job) -> None:
     """Bucket is derived from fit_score plus any HR manual adjustment (clamped to 0-100) —
     override_bucket, set separately via /override, always wins over this in the UI and is
@@ -48,14 +62,28 @@ async def upload_resumes(
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.archived:
+        raise HTTPException(status_code=400, detail="Job is archived and isn't accepting new resumes.")
 
     uploader = db.query(User).filter(User.id == current_hr_user["user_id"]).first()
 
     results: list[Candidate] = []
+    saved_paths: list[str] = []
+    failed_uploads: list[str] = []
 
     for file in files:
         content = await file.read()
-        relative_path = storage.save_file(f"resumes/{job_id}", file.filename, content)
+        try:
+            relative_path = storage.save_file(f"resumes/{job_id}", file.filename, content)
+        except OSError:
+            # A disk-level failure (full disk, permission error, ...) on this one file must
+            # not abort the whole request — that would discard every candidate already
+            # queued earlier in this same batch (added to the session but not yet
+            # committed) while their resume files stay written to disk, orphaned with no
+            # matching DB row. Skip just this file and keep going.
+            failed_uploads.append(file.filename or "unknown")
+            continue
+        saved_paths.append(relative_path)
 
         candidate = Candidate(
             job_id=job_id,
@@ -65,6 +93,12 @@ async def upload_resumes(
         )
 
         try:
+            if not _matches_declared_type(file.filename, content):
+                raise ValueError(
+                    f"{file.filename} doesn't look like a real "
+                    f"{os.path.splitext(file.filename)[1] or 'file'} — it may have been "
+                    "renamed or is corrupted."
+                )
             resume_text, ocr_used = extract_text(file.filename, content)
             candidate.ocr_fallback_used = ocr_used
             profile = parse_resume(resume_text)
@@ -86,6 +120,14 @@ async def upload_resumes(
                 continue
 
             failed, reasons = knockout.check_knockout(profile, job)
+
+            if file.filename.lower().endswith(".pdf"):
+                from app.services.keyword_stuffing import detect_keyword_stuffing
+                stuffing_res = detect_keyword_stuffing(content)
+                if stuffing_res["detected"]:
+                    failed = True
+                    reasons = (reasons or []) + [stuffing_res["reason"]]
+
             candidate.knockout_failed = failed
             candidate.knockout_reasons = reasons
 
@@ -105,7 +147,25 @@ async def upload_resumes(
         db.add(candidate)
         results.append(candidate)
 
-    db.commit()
+    if not results and failed_uploads:
+        raise HTTPException(
+            status_code=502, detail=f"Could not save uploaded file(s): {', '.join(failed_uploads)}"
+        )
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Every file in saved_paths already landed on disk on the assumption its Candidate
+        # row would be committed alongside it — since the commit failed, none of those rows
+        # exist, so leaving the files behind would orphan them permanently.
+        for path in saved_paths:
+            try:
+                os.remove(storage.absolute_path(path))
+            except OSError:
+                pass
+        raise
+
     for candidate in results:
         db.refresh(candidate)
         candidate.uploaded_by_email = uploader.email if uploader else None
@@ -249,6 +309,7 @@ def download_fit_report(candidate_id: uuid.UUID, db: Session = Depends(get_db)):
 def list_candidates(job_id: uuid.UUID, db: Session = Depends(get_db)):
     candidates = (
         db.query(Candidate)
+        .options(joinedload(Candidate.uploader))
         .filter(Candidate.job_id == job_id)
         .order_by(Candidate.fit_score.desc().nullslast())
         .all()
@@ -341,11 +402,20 @@ def delete_candidate(
     candidate = db.get(Candidate, candidate_id)
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # One HR action, one click — archiving first is still recorded as its own audit-log
+    # entry (same reason) rather than skipped, so the trail looks identical to the
+    # explicit archive-then-delete flow even though the caller only made one request.
     if not candidate.archived:
-        raise HTTPException(
-            status_code=400,
-            detail="Candidate must be archived before it can be permanently deleted.",
-        )
+        candidate.archived = True
+        candidate.archived_reason = payload.reason
+        db.add(candidate)
+        db.add(AuditLog(
+            candidate_id=candidate.id,
+            actor=f"hr:{current_hr_user['email']}",
+            action="archive_candidate",
+            detail={"reason": payload.reason},
+        ))
 
     duplicates = _collect_duplicate_chain(db, candidate_id)
 
