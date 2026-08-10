@@ -18,49 +18,22 @@ export default function ReviewDetailPage() {
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [flags, setFlags] = useState<IntegrityFlag[]>([]);
   const [identityCheck, setIdentityCheck] = useState<IdentityCheck | null>(null);
-  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
-  // "none" (no recording exists) is deliberately distinct from "error" (a recording exists
-  // but the download failed) so the two aren't rendered identically, and "loading" gives the
-  // reviewer feedback during what can be a multi-second full-blob download.
-  const [recordingStatus, setRecordingStatus] = useState<"none" | "loading" | "ready" | "error">(
-    "none"
-  );
   // Distinguishes "still loading" from "the fetch failed" — without it a failed session
   // fetch left the page on "Loading…" forever (and an unhandled promise rejection).
   const [loadError, setLoadError] = useState(false);
 
-  // Fetched (not a plain <video src>) so the HR session cookie is reliably sent and the
-  // recording — possibly encrypted at rest — goes through the authenticated, decrypting
-  // /media/recording route rather than the old unauthenticated static file mount.
-  useEffect(() => {
-    if (!session?.recording_file_path) {
-      setRecordingUrl(null);
-      setRecordingStatus("none");
-      return;
-    }
-    let objectUrl: string | null = null;
-    let cancelled = false;
-    setRecordingUrl(null);
-    setRecordingStatus("loading");
-    fetch(`${BASE_URL}/interviews/${sessionId}/media/recording`, { credentials: "include" })
-      .then((res) => {
-        if (!res.ok) throw new Error(`recording fetch failed: ${res.status}`);
-        return res.blob();
-      })
-      .then((blob) => {
-        if (cancelled) return; // a superseded fetch must not set state or leak an object URL
-        objectUrl = URL.createObjectURL(blob);
-        setRecordingUrl(objectUrl);
-        setRecordingStatus("ready");
-      })
-      .catch(() => {
-        if (!cancelled) setRecordingStatus("error");
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [session?.recording_file_path, sessionId]);
+  // Both recordings are fetched (not a plain <video src>) so the HR session cookie is sent
+  // and the media — possibly encrypted at rest — goes through the authenticated, decrypting
+  // /media route rather than the old unauthenticated static file mount. The interviewer's
+  // side is audio-only and, despite the endpoint existing, was never wired into the UI.
+  const candidateRecording = useAuthedRecording(
+    session?.recording_file_path,
+    `${BASE_URL}/interviews/${sessionId}/media/recording`
+  );
+  const interviewerRecording = useAuthedRecording(
+    session?.interviewer_recording_file_path,
+    `${BASE_URL}/interviews/${sessionId}/media/interviewer-recording`
+  );
 
   const refresh = useCallback(() => {
     getJson<InterviewSession>(`/interviews/${sessionId}`)
@@ -179,22 +152,48 @@ export default function ReviewDetailPage() {
 
       <div>
         <h2 className="font-medium mb-2">Candidate recording</h2>
-        {recordingStatus === "loading" && (
+        {candidateRecording.status === "loading" && (
           <p className="text-sm text-zinc-500">Loading recording…</p>
         )}
-        {recordingStatus === "error" && (
+        {candidateRecording.status === "error" && (
           <p className="text-sm text-red-600">
             Couldn&apos;t load the recording — it may still be finalizing, or the file may be
             unavailable.
           </p>
         )}
-        {recordingStatus === "none" && (
+        {candidateRecording.status === "none" && (
           <p className="text-sm text-zinc-500">No recording is available for this session.</p>
         )}
-        {recordingStatus === "ready" && recordingUrl && (
-          <video controls className="w-full max-w-lg rounded-md bg-black" src={recordingUrl} />
+        {candidateRecording.status === "ready" && candidateRecording.url && (
+          <video
+            controls
+            className="w-full max-w-lg rounded-md bg-black"
+            src={candidateRecording.url}
+          />
         )}
       </div>
+
+      {/* Only shown when there's something to show — the transcript block below already notes
+          when no interviewer recording was captured, so a "none" note here would duplicate it. */}
+      {interviewerRecording.status !== "none" && (
+        <div>
+          <h2 className="font-medium mb-2">
+            Interviewer recording{" "}
+            <span className="text-xs font-normal text-zinc-500">(audio only)</span>
+          </h2>
+          {interviewerRecording.status === "loading" && (
+            <p className="text-sm text-zinc-500">Loading recording…</p>
+          )}
+          {interviewerRecording.status === "error" && (
+            <p className="text-sm text-red-600">
+              Couldn&apos;t load the interviewer recording — the file may be unavailable.
+            </p>
+          )}
+          {interviewerRecording.status === "ready" && interviewerRecording.url && (
+            <audio controls className="w-full max-w-lg" src={interviewerRecording.url} />
+          )}
+        </div>
+      )}
 
       {session.transcript_status && (
         <div>
@@ -219,7 +218,7 @@ export default function ReviewDetailPage() {
           )}
           {session.interviewer_join_token && !session.interviewer_recording_file_path && (
             <p className="text-xs text-amber-700 mt-1">
-              No interviewer recording was captured for this session — only the candidate's
+              No interviewer recording was captured for this session — only the candidate&apos;s
               side is shown above.
             </p>
           )}
@@ -367,6 +366,60 @@ export default function ReviewDetailPage() {
       </div>
     </div>
   );
+}
+
+type RecordingStatus = "none" | "loading" | "ready" | "error";
+
+/**
+ * Downloads an authenticated media blob (candidate video / interviewer audio) into an object
+ * URL, exposing an explicit status so the UI can tell apart "no recording exists", "still
+ * downloading", "ready", and "failed" — all of which used to render as the same empty space.
+ * A cancellation guard stops a superseded fetch (session changed under it) from setting state
+ * or leaking an object URL. `path` is the session field that gates whether a recording exists;
+ * `endpoint` is the authenticated route to fetch it from.
+ */
+function useAuthedRecording(
+  path: string | null | undefined,
+  endpoint: string
+): { url: string | null; status: RecordingStatus } {
+  const [url, setUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<RecordingStatus>("none");
+
+  useEffect(() => {
+    if (!path) {
+      // Deliberate synchronous reset: this effect synchronizes React state with an external
+      // fetched blob, and clearing back to "none" when no recording exists is part of that
+      // synchronization, not the cascading-render smell the rule targets.
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
+      setUrl(null);
+      setStatus("none");
+      return;
+    }
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    setUrl(null);
+    setStatus("loading");
+    fetch(endpoint, { credentials: "include" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`recording fetch failed: ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, endpoint]);
+
+  return { url, status };
 }
 
 function formatOffset(ms: number): string {
