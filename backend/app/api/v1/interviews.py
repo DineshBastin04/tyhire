@@ -703,6 +703,8 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 session.interviewer_transcript = f"Transcription failed: {exc}"
                 session.interviewer_transcript_status = "failed"
 
+        # Q&A verification is the one post-processing step that genuinely needs the transcript
+        # TEXT, so it stays gated on a successful transcription.
         if session.transcript_status == "done":
             try:
                 session.merged_transcript = merge_transcripts(
@@ -715,19 +717,25 @@ def _process_recordings_and_save(session_id: uuid.UUID):
             except Exception as exc:  # noqa: BLE001 - best-effort, not core status
                 session.qa_analysis = {"error": str(exc)}
 
-            try:
-                if not candidate_wav_path:
-                    raise RuntimeError("No extracted audio available (transcription step failed earlier)")
-                session.voice_tone_analysis = analyze_voice_tone(candidate_wav_path)
-            except Exception as exc:  # noqa: BLE001 - best-effort, not core status
-                session.voice_tone_analysis = {"error": str(exc)}
+        # Voice-tone and facial-affect analysis do NOT depend on the transcript text — voice
+        # tone reads only the extracted audio WAV, and facial affect reads video frames
+        # straight from the recording. They used to run inside the transcript-done branch
+        # above, so any transcription failure (e.g. Whisper rejecting an oversized file)
+        # silently discarded two unrelated signals the reviewer relies on. Run them
+        # independently so each degrades on its own actual failure, not on transcription's.
+        try:
+            if not candidate_wav_path:
+                raise RuntimeError("No extracted audio available (audio extraction failed earlier)")
+            session.voice_tone_analysis = analyze_voice_tone(candidate_wav_path)
+        except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            session.voice_tone_analysis = {"error": str(exc)}
 
-            try:
-                with storage.decrypted_temp_copy(session.recording_file_path) as path:
-                    frame_paths = extract_frames(path)
-                    session.facial_affect_analysis = analyze_facial_affect(frame_paths)
-            except Exception as exc:  # noqa: BLE001 - best-effort, not core status
-                session.facial_affect_analysis = {"error": str(exc)}
+        try:
+            with storage.decrypted_temp_copy(session.recording_file_path) as path:
+                frame_paths = extract_frames(path)
+                session.facial_affect_analysis = analyze_facial_affect(frame_paths)
+        except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            session.facial_affect_analysis = {"error": str(exc)}
 
         db.add(session)
         db.commit()
