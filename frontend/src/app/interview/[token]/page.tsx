@@ -102,12 +102,19 @@ export default function InterviewJoinPage() {
 }
 
 function CompletedScreen({ hadError }: { hadError: boolean }) {
+  // Script-initiated tab close only works for tabs opened by script, which this one wasn't
+  // (it's a normal navigated-to link), so most browsers silently ignore window.close(). We
+  // still attempt it — it succeeds in the rare script-opened case — but immediately fall
+  // back to an explicit "you can close this tab" instruction so the button never appears to
+  // do nothing. The teardown that actually matters (camera/mic/screen-share) already happened
+  // before this screen ever rendered, in InterviewRecorder.finish().
+  const [closeBlocked, setCloseBlocked] = useState(false);
+
   function handleClose() {
-    // Best-effort — script-initiated tab close only works for tabs opened by script, which
-    // this one wasn't (it's a normal navigated-to link), so most browsers will silently
-    // ignore this. The teardown that actually matters (camera/mic/screen-share) already
-    // happened before this screen ever rendered, in InterviewRecorder.finish().
     window.close();
+    // If the tab were script-closable it's already gone and this state update never renders;
+    // otherwise we surface the manual-close hint in its place.
+    setCloseBlocked(true);
   }
 
   return (
@@ -121,9 +128,16 @@ function CompletedScreen({ hadError }: { hadError: boolean }) {
             : "Thanks — your interview has been submitted for review. Your camera, " +
               "microphone, and screen sharing have been turned off."}
         </p>
-        <button onClick={handleClose} className="btn-outline">
-          Close
-        </button>
+        {closeBlocked ? (
+          <p className="text-sm text-zinc-500">
+            You can now safely close this tab. (Your browser won&apos;t let the page close
+            itself, so please close the tab manually — everything has already been submitted.)
+          </p>
+        ) : (
+          <button onClick={handleClose} className="btn-outline">
+            Close
+          </button>
+        )}
       </div>
     </Centered>
   );
