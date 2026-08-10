@@ -1,6 +1,6 @@
 import base64
 
-from app.services.openai_client import call_tool
+from app.services.openai_client import OpenAIToolError, call_tool
 
 MATCH_TOOL = {
     "type": "function",
@@ -47,6 +47,19 @@ def check_identity_match(id_photo: bytes, id_media_type: str, selfie: bytes, sel
         _image_block(id_photo, id_media_type),
         _image_block(selfie, selfie_media_type),
     ]
-    result = call_tool(system=SYSTEM_PROMPT, user_content=user_content, tool=MATCH_TOOL)
+    try:
+        result = call_tool(system=SYSTEM_PROMPT, user_content=user_content, tool=MATCH_TOOL)
+    except OpenAIToolError as exc:
+        # This comparison is a heuristic aid, never the system of record (see SYSTEM_PROMPT),
+        # so its unavailability must not hard-fail the candidate's identity submission with a
+        # 500. Degrade to the exact outcome an ambiguous photo already produces: 'uncertain',
+        # always routed to a human reviewer. Confidence/verdict are set explicitly so the
+        # caller's match["confidence"]/match["verdict"] reads stay safe.
+        return {
+            "confidence": 0.0,
+            "verdict": "uncertain",
+            "notes": f"Automated comparison unavailable: {exc}",
+            "needs_human_review": True,
+        }
     result["needs_human_review"] = result.get("verdict") != "match" or result.get("confidence", 0) < 0.8
     return result
