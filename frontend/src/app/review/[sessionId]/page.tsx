@@ -19,6 +19,12 @@ export default function ReviewDetailPage() {
   const [flags, setFlags] = useState<IntegrityFlag[]>([]);
   const [identityCheck, setIdentityCheck] = useState<IdentityCheck | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  // "none" (no recording exists) is deliberately distinct from "error" (a recording exists
+  // but the download failed) so the two aren't rendered identically, and "loading" gives the
+  // reviewer feedback during what can be a multi-second full-blob download.
+  const [recordingStatus, setRecordingStatus] = useState<"none" | "loading" | "ready" | "error">(
+    "none"
+  );
   // Distinguishes "still loading" from "the fetch failed" — without it a failed session
   // fetch left the page on "Loading…" forever (and an unhandled promise rejection).
   const [loadError, setLoadError] = useState(false);
@@ -29,19 +35,29 @@ export default function ReviewDetailPage() {
   useEffect(() => {
     if (!session?.recording_file_path) {
       setRecordingUrl(null);
+      setRecordingStatus("none");
       return;
     }
     let objectUrl: string | null = null;
+    let cancelled = false;
+    setRecordingUrl(null);
+    setRecordingStatus("loading");
     fetch(`${BASE_URL}/interviews/${sessionId}/media/recording`, { credentials: "include" })
-      .then((res) => (res.ok ? res.blob() : null))
-      .then((blob) => {
-        if (blob) {
-          objectUrl = URL.createObjectURL(blob);
-          setRecordingUrl(objectUrl);
-        }
+      .then((res) => {
+        if (!res.ok) throw new Error(`recording fetch failed: ${res.status}`);
+        return res.blob();
       })
-      .catch(() => {});
+      .then((blob) => {
+        if (cancelled) return; // a superseded fetch must not set state or leak an object URL
+        objectUrl = URL.createObjectURL(blob);
+        setRecordingUrl(objectUrl);
+        setRecordingStatus("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setRecordingStatus("error");
+      });
     return () => {
+      cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [session?.recording_file_path, sessionId]);
@@ -161,9 +177,24 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
-      {recordingUrl && (
-        <video controls className="w-full max-w-lg rounded-md bg-black" src={recordingUrl} />
-      )}
+      <div>
+        <h2 className="font-medium mb-2">Candidate recording</h2>
+        {recordingStatus === "loading" && (
+          <p className="text-sm text-zinc-500">Loading recording…</p>
+        )}
+        {recordingStatus === "error" && (
+          <p className="text-sm text-red-600">
+            Couldn&apos;t load the recording — it may still be finalizing, or the file may be
+            unavailable.
+          </p>
+        )}
+        {recordingStatus === "none" && (
+          <p className="text-sm text-zinc-500">No recording is available for this session.</p>
+        )}
+        {recordingStatus === "ready" && recordingUrl && (
+          <video controls className="w-full max-w-lg rounded-md bg-black" src={recordingUrl} />
+        )}
+      </div>
 
       {session.transcript_status && (
         <div>
