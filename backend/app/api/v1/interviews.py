@@ -415,6 +415,18 @@ def start_session(
             detail="Identity verification did not match. Contact HR to proceed.",
         )
 
+    # Both gates passed — the interview is actually beginning now, so advance the session out
+    # of any pre-start state. Without this a session that required HR identity review stayed
+    # stuck at identity_pending: for a no_match verdict, right through the live interview once
+    # HR cleared it; for verdicts that don't hard-block start (uncertain / liveness fail), all
+    # the way to /complete. Either way HR saw a stale identity_pending status the whole time.
+    # Idempotent — /start is retried on reload — and can't clobber `completed`, which
+    # require_session_token already rejects before this handler runs.
+    if session.status in (SessionStatus.scheduled, SessionStatus.identity_pending):
+        session.status = SessionStatus.in_progress
+        db.add(session)
+        db.commit()
+
     return StartSessionResponse(started=True)
 
 
