@@ -461,16 +461,15 @@ function ScreenShareGate({
   async function requestShare() {
     setRequesting(true);
     setError(null);
-    // Fired in the same click as getDisplayMedia below so it still counts as a user
-    // gesture — awaiting first can lose that context in some browsers. Not the only
-    // place this is attempted (see JoinGate) — screen-share can be declined/retried, and
-    // fullscreen shouldn't depend on that succeeding first.
-    requestFullscreen().catch(() => {});
 
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error("Screen sharing is not supported in this browser. Please use Chrome, Edge, or Firefox.");
+      }
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = stream;
       const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error("No video track found in screen share stream.");
       onScreenTrack(track);
       const settings = track.getSettings() as MediaTrackSettings & { displaySurface?: string };
 
@@ -483,12 +482,21 @@ function ScreenShareGate({
       };
 
       onDone();
-    } catch (err) {
-      setError(
-        err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Screen sharing was declined or blocked. This is required to continue — please allow it and try again."
-          : "Couldn't start screen sharing. Please try again."
-      );
+    } catch (err: unknown) {
+      console.warn("Screen share request error:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        err instanceof DOMException &&
+        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")
+      ) {
+        setError(
+          "Screen sharing was cancelled or blocked. Please click the button below and select a screen/window to continue."
+        );
+      } else if (err instanceof DOMException && err.name === "AbortError") {
+        setError("Screen sharing selection was dismissed. Please try again.");
+      } else {
+        setError(msg || "Couldn't start screen sharing. Please try again.");
+      }
     } finally {
       setRequesting(false);
     }
