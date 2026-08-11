@@ -645,6 +645,33 @@ function InterviewRecorder({
   const [micMuted, setMicMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [muteRequested, setMuteRequested] = useState(false);
+  const [currentScreenTrack, setCurrentScreenTrack] = useState<MediaStreamTrack | null>(
+    screenTrack || screenStreamRef.current?.getVideoTracks()[0] || null
+  );
+
+  useEffect(() => {
+    if (screenTrack) {
+      setCurrentScreenTrack(screenTrack);
+    } else if (screenStreamRef.current) {
+      const t = screenStreamRef.current.getVideoTracks()[0];
+      if (t) setCurrentScreenTrack(t);
+    }
+  }, [screenTrack, screenStreamRef]);
+
+  async function toggleScreenShare() {
+    if (currentScreenTrack && currentScreenTrack.readyState === "live") {
+      currentScreenTrack.stop();
+      setCurrentScreenTrack(null);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenStreamRef.current = stream;
+        const track = stream.getVideoTracks()[0];
+        setCurrentScreenTrack(track);
+        track.onended = () => setCurrentScreenTrack(null);
+      } catch {}
+    }
+  }
 
   // Live Speech Recognition: stream candidate's speech to interviewer live transcript panel
   useLiveSpeech({
@@ -973,7 +1000,7 @@ function InterviewRecorder({
           token={session.join_token}
           role="candidate"
           iceServers={session.ice_servers}
-          extraVideoTrack={screenTrack}
+          extraVideoTrack={currentScreenTrack}
           enableEyeTracking={true}
           onApiReady={(api) => {
             webrtcApiRef.current = api;
@@ -998,6 +1025,9 @@ function InterviewRecorder({
         </button>
         <button onClick={toggleCamera} className="btn-outline text-xs px-2 py-1">
           {cameraOff ? "Turn camera on" : "Turn camera off"}
+        </button>
+        <button onClick={toggleScreenShare} className="btn-outline text-xs px-2 py-1">
+          {currentScreenTrack ? "🖥️ Screen sharing (Active)" : "🖥️ Share screen"}
         </button>
       </div>
       {/* Not display:none deliberately — some browsers stop maintaining a live decoded

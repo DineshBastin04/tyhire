@@ -91,6 +91,10 @@ export default function WebRTCRoom({
   const extraVideoTrackRef = useRef<MediaStreamTrack | null | undefined>(extraVideoTrack);
   const tracksAddedRef = useRef(false);
 
+  // Stashed streams in case ref is not immediately bound
+  const remoteCameraStreamRef = useRef<MediaStream | null>(null);
+  const remoteScreenStreamRef = useRef<MediaStream | null>(null);
+
   useEffect(() => {
     extraVideoTrackRef.current = extraVideoTrack;
     if (extraVideoTrack && pcRef.current && tracksAddedRef.current) {
@@ -102,12 +106,27 @@ export default function WebRTCRoom({
     }
   }, [extraVideoTrack]);
 
+  // Keep video elements synced whenever hasRemoteScreen updates
+  useEffect(() => {
+    if (remoteScreenRef.current && remoteScreenStreamRef.current) {
+      remoteScreenRef.current.srcObject = remoteScreenStreamRef.current;
+      remoteScreenRef.current.play().catch(() => {});
+    }
+    if (remoteVideoRef.current && remoteCameraStreamRef.current) {
+      remoteVideoRef.current.srcObject = remoteCameraStreamRef.current;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [hasRemoteScreen]);
+
   useEffect(() => {
     let cancelled = false;
     let pc: RTCPeerConnection | null = null;
     let ws: WebSocket | null = null;
     let localStream: MediaStream | null = null;
     let remoteCameraTrackId: string | null = null;
+
+    // Queue for ICE candidates arriving before setRemoteDescription
+    const pendingIceCandidates: RTCIceCandidateInit[] = [];
 
     const polite = role === "candidate";
     let makingOffer = false;
@@ -188,12 +207,14 @@ export default function WebRTCRoom({
           
           if (!remoteCameraTrackId) {
             remoteCameraTrackId = track.id;
+            remoteCameraStreamRef.current = stream;
             if (remoteVideoRef.current) {
               remoteVideoRef.current.srcObject = stream;
               remoteVideoRef.current.play().catch(() => {});
             }
           } else if (track.id !== remoteCameraTrackId) {
             // Second video track received is the screenshare
+            remoteScreenStreamRef.current = stream;
             if (remoteScreenRef.current) {
               remoteScreenRef.current.srcObject = stream;
               remoteScreenRef.current.play().catch(() => {});
@@ -204,6 +225,7 @@ export default function WebRTCRoom({
           track.onended = () => {
             if (track.id !== remoteCameraTrackId) {
               setHasRemoteScreen(false);
+              remoteScreenStreamRef.current = null;
               if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
             }
           };
@@ -242,6 +264,8 @@ export default function WebRTCRoom({
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
           if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
           remoteCameraTrackId = null;
+          remoteCameraStreamRef.current = null;
+          remoteScreenStreamRef.current = null;
           setHasRemoteScreen(false);
           onPeerEnded?.();
         } else if (message.type === "call-ended") {
@@ -252,17 +276,36 @@ export default function WebRTCRoom({
             message.type === "offer" && (makingOffer || pc!.signalingState !== "stable");
           ignoreOffer = !polite && offerCollision;
           if (ignoreOffer) return;
+          
           await pc!.setRemoteDescription(description);
+
+          // Drain queued ICE candidates now that remote description is set
+          while (pendingIceCandidates.length > 0) {
+            const candidate = pendingIceCandidates.shift();
+            if (candidate) {
+              try {
+                await pc!.addIceCandidate(candidate);
+              } catch (e) {
+                console.warn("Error adding queued ICE candidate", e);
+              }
+            }
+          }
+
           if (message.type === "offer") {
             addLocalTracks();
             await pc!.setLocalDescription();
             send({ type: pc!.localDescription!.type, sdp: pc!.localDescription!.sdp });
           }
         } else if (message.type === "ice-candidate" && message.candidate) {
-          try {
-            await pc!.addIceCandidate(message.candidate);
-          } catch (err) {
-            if (!ignoreOffer) console.error("failed to add ICE candidate", err);
+          // If remote description is not set yet, buffer candidate to avoid InvalidStateError
+          if (!pc || !pc.remoteDescription || !pc.remoteDescription.type) {
+            pendingIceCandidates.push(message.candidate);
+          } else {
+            try {
+              await pc.addIceCandidate(message.candidate);
+            } catch (err) {
+              if (!ignoreOffer) console.warn("failed to add ICE candidate", err);
+            }
           }
         } else if (message.type === "mute-request") {
           onMuteRequested?.();
