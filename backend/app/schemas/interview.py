@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.interview import SessionStatus, SignalType
 
@@ -39,6 +39,44 @@ class SessionOut(BaseModel):
     # Populated only by the candidate/interviewer token-lookup endpoints (freshly minted
     # per fetch, never stored) — absent everywhere else, including every HR-facing
     # endpoint, since HR never joins the call itself. See services/video_provider.py.
+    ice_servers: Optional[list[dict]] = None
+    livekit_token: Optional[str] = None
+    livekit_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CandidateJoinSessionOut(BaseModel):
+    """Response for GET /join/{token} — deliberately excludes interviewer_join_token
+    (the other role's secret), video_room_token (server-internal only, never read by the
+    frontend), and every transcript/analysis/recording/PII field that SessionOut carries
+    for HR views. A candidate holding only their own join_token must not be able to see
+    or derive any of that."""
+
+    id: uuid.UUID
+    job_id: Optional[uuid.UUID]
+    candidate_name: str
+    status: SessionStatus
+    join_token: str
+    ice_servers: Optional[list[dict]] = None
+    livekit_token: Optional[str] = None
+    livekit_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class InterviewerJoinSessionOut(BaseModel):
+    """Response for GET /interviewer-join/{token} — mirrors CandidateJoinSessionOut's
+    restriction in the other direction: excludes join_token (the candidate's secret) and
+    all transcript/analysis/recording/PII fields."""
+
+    id: uuid.UUID
+    job_id: Optional[uuid.UUID]
+    candidate_name: str
+    status: SessionStatus
+    interviewer_join_token: str
     ice_servers: Optional[list[dict]] = None
     livekit_token: Optional[str] = None
     livekit_url: Optional[str] = None
@@ -88,7 +126,13 @@ class SentimentSampleOut(BaseModel):
 class SignalEventIn(BaseModel):
     signal_type: SignalType
     session_offset_ms: int
-    weight: float = 1.0
+    # Client-supplied (candidate-facing POST /signals) and fed straight into
+    # integrity.fuse_signals' severity sum with no other gate in between — without a
+    # bound here, a crafted request (e.g. weight=-99999) could swing the integrity score
+    # wildly in either direction. 10.0 gives headroom above the highest weight the backend
+    # itself ever assigns (5, for location_mismatch — see api/v1/interviews.py) without
+    # letting a single event dominate a cluster's severity outright.
+    weight: float = Field(default=1.0, ge=0.0, le=10.0)
     meta: dict[str, Any] = {}
 
 

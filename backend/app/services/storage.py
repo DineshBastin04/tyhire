@@ -22,12 +22,19 @@ once: `python -m app.jobs.encrypt_storage_backfill` (see services/storage_backfi
 import contextlib
 import os
 import shutil
+import subprocess
 import tempfile
 import uuid
 
 from app.core.config import settings
 
 ENCRYPTED_SUFFIX = ".enc"
+
+# The fixed 4-byte magic number every WebM/Matroska stream opens with (the EBML header).
+# A MediaRecorder's very first ondataavailable chunk carries it; every later chunk from
+# that *same* recorder instance is pure cluster continuation data and never repeats it —
+# see append_recording_chunk below.
+EBML_MAGIC = b"\x1a\x45\xdf\xa3"
 
 
 def _fernet():
@@ -94,6 +101,82 @@ def append_file_chunk(sub_dir: str, filename: str, chunk: bytes) -> str:
     with open(full_path, "ab") as f:
         f.write(chunk)
     return os.path.join(sub_dir, safe_name)
+
+
+def append_recording_chunk(
+    sub_dir: str, current_relative_path: str | None, chunk: bytes
+) -> tuple[str, bool]:
+    """Appends a live-call recording chunk, detecting when `chunk` is actually the start
+    of a brand new, independent MediaRecorder stream — e.g. the candidate's browser
+    reconnected mid-interview and started recording again — rather than a continuation of
+    the file at current_relative_path. Seeing the EBML magic number again on a file that
+    already has bytes in it is that signal: a genuine continuation chunk from the *same*
+    recorder never carries it. Blindly appending such a chunk (the old behavior) embeds a
+    second, independent WebM container inside one file, which no single-file consumer can
+    read past the first.
+
+    Never overwrites or deletes an existing file — on detecting a new stream, it starts a
+    new one instead and reports that back via the second return value so the caller can
+    track the old path as a completed segment (see concat_segments, called at /complete).
+    Returns (new_relative_path, is_new_segment).
+    """
+    directory = _ensure_dir(sub_dir)
+    is_new_segment = False
+
+    if current_relative_path:
+        current_full_path = os.path.join(settings.storage_root, current_relative_path)
+        has_content = os.path.exists(current_full_path) and os.path.getsize(current_full_path) > 0
+        if has_content and chunk[:4] == EBML_MAGIC:
+            is_new_segment = True
+
+    if current_relative_path and not is_new_segment:
+        relative_path = current_relative_path
+        full_path = os.path.join(settings.storage_root, relative_path)
+    else:
+        filename = f"{uuid.uuid4().hex}_recording.webm"
+        relative_path = os.path.join(sub_dir, filename)
+        full_path = os.path.join(directory, filename)
+
+    with open(full_path, "ab") as f:
+        f.write(chunk)
+    return relative_path, is_new_segment
+
+
+def concat_segments(segment_relative_paths: list[str], sub_dir: str) -> str:
+    """Stitches multiple independently-recorded WebM segments (see append_recording_chunk)
+    back into one valid file, via ffmpeg's concat demuxer with a stream copy — no
+    re-encode, since every segment came from the same browser/codec. Called once, at
+    /complete, before finalize_encrypt, so encryption still applies exactly once to
+    exactly one final file. Segment inputs are left in place on disk (cleaned up later by
+    remove_directory when the whole session is deleted), not deleted here."""
+    if len(segment_relative_paths) == 1:
+        return segment_relative_paths[0]
+
+    directory = _ensure_dir(sub_dir)
+    list_path = os.path.join(directory, f"{uuid.uuid4().hex}_concat.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for rel_path in segment_relative_paths:
+            # The concat demuxer resolves relative paths in this list file relative to the
+            # list file's OWN directory, not the process's cwd — absolute_path()'s result
+            # is itself cwd-relative (storage_root is "../storage"), so writing that as-is
+            # here gets it resolved a second time and doubled. Fully resolving with
+            # os.path.abspath first avoids that. Single quotes are escaped since the
+            # demuxer parses this like a shell-ish mini-format.
+            escaped = os.path.abspath(absolute_path(rel_path)).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+    output_filename = f"{uuid.uuid4().hex}_recording_merged.webm"
+    output_path = os.path.join(directory, output_filename)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path],
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        os.remove(list_path)
+
+    return os.path.join(sub_dir, output_filename)
 
 
 def finalize_encrypt(relative_path: str | None) -> str | None:

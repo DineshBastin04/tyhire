@@ -181,7 +181,8 @@ export type SignalType =
   | "devtools_open"
   | "screen_share_partial"
   | "screen_share_stopped"
-  | "location_mismatch";
+  | "location_mismatch"
+  | "ai_extension_detected";
 
 export interface LiveSignalEvent {
   signal_type: SignalType;

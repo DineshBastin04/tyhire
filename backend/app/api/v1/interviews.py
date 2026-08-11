@@ -1,5 +1,7 @@
 import contextlib
+import logging
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,7 +20,8 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth import require_admin, require_hr_auth
@@ -37,10 +40,12 @@ from app.models.interview import (
     SignalType,
 )
 from app.schemas.interview import (
+    CandidateJoinSessionOut,
     IdentityCheckOut,
     IdentityCheckOverrideRequest,
     IntegrityFlagOut,
     InterviewerDecisionRequest,
+    InterviewerJoinSessionOut,
     ReviewDecision,
     SentimentSampleOut,
     SessionCreate,
@@ -60,6 +65,8 @@ from app.services.transcription import transcribe_with_segments
 from app.services.video_extract import extract_frames
 from app.services.voice_tone import analyze_voice_tone
 from app.services.livekit_service import generate_livekit_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -148,35 +155,99 @@ def list_sessions_for_candidate(candidate_id: uuid.UUID, db: Session = Depends(g
     )
 
 
+RANGE_HEADER_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+RECORDING_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+
+def _iter_file_range(path: str, start: int, end: int):
+    """Yields the [start, end] byte range (inclusive) from path in fixed-size chunks —
+    never holds more than one chunk in memory, unlike reading the whole file up front."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            data = f.read(min(RECORDING_CHUNK_SIZE, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
+
+
+def _serve_recording(relative_path: str, media_type: str, request: Request) -> StreamingResponse:
+    """Streams a (possibly encrypted-at-rest) recording through an authenticated route
+    instead of the public static /media mount, with Range support so a <video>/<audio>
+    element can seek and start playing before the whole file (up to several hundred MB)
+    has downloaded, rather than requiring it in full first.
+
+    decrypted_temp_copy's context manager can't be used with a plain `with` here — the
+    StreamingResponse generator below runs *after* this function returns, once Starlette
+    is actually sending the body, so the temp file it creates for an encrypted recording
+    must outlive this function. Driving it manually and handing its __exit__ to the
+    response's background task defers cleanup until the whole response has been sent."""
+    ctx = storage.decrypted_temp_copy(relative_path)
+    real_path = ctx.__enter__()
+    cleanup = BackgroundTask(ctx.__exit__, None, None, None)
+
+    try:
+        file_size = os.path.getsize(real_path)
+        range_header = request.headers.get("range")
+
+        if range_header:
+            match = RANGE_HEADER_RE.match(range_header.strip())
+            if not match:
+                raise HTTPException(status_code=416, detail="Invalid Range header")
+            start = int(match.group(1)) if match.group(1) else 0
+            end = int(match.group(2)) if match.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+            if start > end or start >= file_size:
+                raise HTTPException(
+                    status_code=416,
+                    detail="Range not satisfiable",
+                    headers={"Content-Range": f"bytes */{file_size}"},
+                )
+            return StreamingResponse(
+                _iter_file_range(real_path, start, end),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(end - start + 1),
+                },
+                background=cleanup,
+            )
+
+        return StreamingResponse(
+            _iter_file_range(real_path, 0, file_size - 1),
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+            background=cleanup,
+        )
+    except Exception:
+        cleanup.func(*cleanup.args)
+        raise
+
+
 @router.get(
     "/{session_id}/media/recording",
     dependencies=[Depends(require_hr_auth)],
 )
-def get_candidate_recording(session_id: uuid.UUID, db: Session = Depends(get_db)):
-    """Proxies the (possibly encrypted-at-rest) recording through an authenticated route
-    instead of the public static /media mount — that mount has no access control at all,
-    which matters once recordings can contain sensitive interview content."""
+def get_candidate_recording(session_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     session = db.get(InterviewSession, session_id)
     if not session or not session.recording_file_path:
         raise HTTPException(status_code=404, detail="No recording available")
-    with storage.decrypted_temp_copy(session.recording_file_path) as path:
-        with open(path, "rb") as f:
-            content = f.read()
-    return Response(content=content, media_type="video/webm")
+    return _serve_recording(session.recording_file_path, "video/webm", request)
 
 
 @router.get(
     "/{session_id}/media/interviewer-recording",
     dependencies=[Depends(require_hr_auth)],
 )
-def get_interviewer_recording(session_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_interviewer_recording(session_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     session = db.get(InterviewSession, session_id)
     if not session or not session.interviewer_recording_file_path:
         raise HTTPException(status_code=404, detail="No interviewer recording available")
-    with storage.decrypted_temp_copy(session.interviewer_recording_file_path) as path:
-        with open(path, "rb") as f:
-            content = f.read()
-    return Response(content=content, media_type="audio/webm")
+    return _serve_recording(session.interviewer_recording_file_path, "audio/webm", request)
 
 
 @router.post("/cleanup-expired-media", dependencies=[Depends(require_hr_auth)])
@@ -291,7 +362,7 @@ def decide_flag(
 # --- Candidate-facing (authorized by join token, no login) -----------------------------
 
 
-@router.get("/join/{join_token}", response_model=SessionOut)
+@router.get("/join/{join_token}", response_model=CandidateJoinSessionOut)
 def get_session_by_token(join_token: str, db: Session = Depends(get_db)):
     session = db.query(InterviewSession).filter(InterviewSession.join_token == join_token).first()
     if not session:
@@ -410,7 +481,16 @@ def start_session(
         .order_by(IdentityCheck.created_at.desc())
         .first()
     )
-    if latest_check and latest_check.match_verdict == "no_match" and not latest_check.cleared_by_hr:
+    if not latest_check:
+        raise HTTPException(
+            status_code=409,
+            detail="Identity verification has not been completed for this interview.",
+        )
+    # needs_human_review already covers no_match, uncertain, AND failed liveness (see
+    # submit_identity_check) — gating on the literal "no_match" string here let uncertain
+    # verdicts and failed-liveness submissions start unblocked. cleared_by_hr is the one
+    # designed override for all three, so it stays the sole way past this.
+    if latest_check.needs_human_review and not latest_check.cleared_by_hr:
         raise HTTPException(
             status_code=409,
             detail="Identity verification did not match. Contact HR to proceed.",
@@ -474,6 +554,12 @@ def override_identity_check(
     check.cleared_reason = payload.reason
     db.add(check)
 
+    # Advance the session status to in_progress to clear the stale status in the UI
+    session = db.get(InterviewSession, session_id)
+    if session and session.status == SessionStatus.identity_pending:
+        session.status = SessionStatus.in_progress
+        db.add(session)
+
     db.add(AuditLog(
         interview_session_id=session_id,
         actor=f"hr:{current_hr_user['email']}",
@@ -533,7 +619,14 @@ async def upload_recording_chunk(
     if session.started_recording_at is None:
         session.started_recording_at = datetime.now(timezone.utc)
     content = await chunk.read()
-    relative_path = storage.append_file_chunk(f"interviews/{session.id}", "recording.webm", content)
+    relative_path, is_new_segment = storage.append_recording_chunk(
+        f"interviews/{session.id}", session.recording_file_path, content
+    )
+    if is_new_segment and session.recording_file_path:
+        session.recording_segment_paths = [
+            *(session.recording_segment_paths or []),
+            session.recording_file_path,
+        ]
     session.recording_file_path = relative_path
     db.add(session)
     db.commit()
@@ -543,7 +636,7 @@ async def upload_recording_chunk(
 # --- Interviewer-facing (authorized by a separate interviewer token, no login) ---------
 
 
-@router.get("/interviewer-join/{interviewer_token}", response_model=SessionOut)
+@router.get("/interviewer-join/{interviewer_token}", response_model=InterviewerJoinSessionOut)
 def get_session_by_interviewer_token(interviewer_token: str, db: Session = Depends(get_db)):
     session = (
         db.query(InterviewSession)
@@ -573,9 +666,14 @@ async def upload_interviewer_recording_chunk(
     if session.interviewer_started_recording_at is None:
         session.interviewer_started_recording_at = datetime.now(timezone.utc)
     content = await chunk.read()
-    relative_path = storage.append_file_chunk(
-        f"interviews/{session.id}", "interviewer_recording.webm", content
+    relative_path, is_new_segment = storage.append_recording_chunk(
+        f"interviews/{session.id}", session.interviewer_recording_file_path, content
     )
+    if is_new_segment and session.interviewer_recording_file_path:
+        session.interviewer_recording_segment_paths = [
+            *(session.interviewer_recording_segment_paths or []),
+            session.interviewer_recording_file_path,
+        ]
     session.interviewer_recording_file_path = relative_path
     db.add(session)
     db.commit()
@@ -649,6 +747,7 @@ def _process_sentiment_sample(sample_id: uuid.UUID, relative_path: str):
                 frame_paths = extract_frames(path, count=1)
                 sample.facial_affect = analyze_facial_affect(frame_paths)
         except Exception as exc:  # noqa: BLE001 - best-effort, same pattern as post-call analysis
+            logger.warning("Facial affect analysis failed for sample %s: %s", sample_id, exc)
             sample.facial_affect = {"error": str(exc)}
 
         try:
@@ -656,10 +755,17 @@ def _process_sentiment_sample(sample_id: uuid.UUID, relative_path: str):
                 wav_path = extract_audio_wav(path)
                 sample.voice_tone = analyze_voice_tone(wav_path)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("Voice tone analysis failed for sample %s: %s", sample_id, exc)
             sample.voice_tone = {"error": str(exc)}
 
         db.add(sample)
         db.commit()
+    except Exception:  # noqa: BLE001 - backstop: without this, e.g. db.get() itself
+        # throwing left this task dying silently with nothing in server logs at all.
+        # There's no status field on SentimentSample to fix up here (unlike
+        # InterviewSession.transcript_status below) — a missed sample just stays missing,
+        # which the live-sentiment/review UI already tolerates.
+        logger.exception("Sentiment sample processing failed for sample %s", sample_id)
     finally:
         db.close()
 
@@ -694,10 +800,64 @@ def _process_recordings_and_save(session_id: uuid.UUID):
     db = SessionLocal()
     candidate_wav_path: str | None = None
     interviewer_wav_path: str | None = None
+    session: InterviewSession | None = None
     try:
         session = db.get(InterviewSession, session_id)
         if not session:
             return
+
+        # Both moved here from POST /complete's request handler — confirmed ~5s of blocking
+        # time for two 300MB recordings when done synchronously there, which bought nothing
+        # (HR never opens the review page within seconds of the call ending) while making
+        # the candidate's browser sit on the "Finish interview" click for it.
+        #
+        # If the candidate's browser reconnected mid-call, append_recording_chunk (see
+        # storage.py) will have rolled the file at that point into *_segment_paths rather
+        # than corrupting it, leaving several valid-on-their-own segments instead of one
+        # complete recording. Stitch them back into a single file now, before encrypting —
+        # best-effort: on failure, fall back to just the last segment (still a real,
+        # playable file, just missing the earlier part of the call) rather than aborting
+        # the rest of this task, and leave a record of it for HR/support.
+        for path_attr, segments_attr in (
+            ("recording_file_path", "recording_segment_paths"),
+            ("interviewer_recording_file_path", "interviewer_recording_segment_paths"),
+        ):
+            segments = getattr(session, segments_attr) or []
+            current_path = getattr(session, path_attr)
+            if not (segments and current_path):
+                continue
+            try:
+                merged_path = storage.concat_segments(
+                    [*segments, current_path], f"interviews/{session.id}"
+                )
+                setattr(session, path_attr, merged_path)
+                setattr(session, segments_attr, [])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Recording segment merge failed for session %s (%s): %s",
+                    session.id, path_attr, exc,
+                )
+                db.add(AuditLog(
+                    interview_session_id=session.id,
+                    actor="system",
+                    action="recording_segments_merge_failed",
+                    detail={"path_attr": path_attr, "segments": segments, "error": str(exc)},
+                ))
+
+        # Repair unfinalized/corrupted WebM chunks using ffmpeg prior to encryption
+        _repair_webm_container(session.recording_file_path)
+        if session.interviewer_recording_file_path:
+            _repair_webm_container(session.interviewer_recording_file_path)
+
+        # Encrypted here, once, now that the file is finished growing — append_file_chunk
+        # can't encrypt incrementally (see storage.py). decrypted_temp_copy below decrypts
+        # to a temp copy on demand for ffmpeg/whisper.
+        session.recording_file_path = storage.finalize_encrypt(session.recording_file_path)
+        session.interviewer_recording_file_path = storage.finalize_encrypt(
+            session.interviewer_recording_file_path
+        )
+        db.add(session)
+        db.commit()
 
         candidate_segments: list[dict] = []
         try:
@@ -741,6 +901,7 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 except Exception as exc:
                     print(f"[post-processing] Voice verification failed: {exc}")
         except Exception as exc:  # noqa: BLE001 - surfaced on the review page, not silently dropped
+            logger.warning("Candidate transcription failed for session %s: %s", session.id, exc)
             session.transcript = f"Transcription failed: {exc}"
             session.transcript_status = "failed"
 
@@ -754,6 +915,7 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 session.interviewer_transcript_status = "done"
                 interviewer_segments = segments
             except Exception as exc:  # noqa: BLE001
+                logger.warning("Interviewer transcription failed for session %s: %s", session.id, exc)
                 session.interviewer_transcript = f"Transcription failed: {exc}"
                 session.interviewer_transcript_status = "failed"
 
@@ -769,6 +931,7 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 )
                 session.qa_analysis = analyze_qa(session.merged_transcript or session.transcript)
             except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+                logger.warning("Q&A analysis failed for session %s: %s", session.id, exc)
                 session.qa_analysis = {"error": str(exc)}
 
         # Voice-tone and facial-affect analysis do NOT depend on the transcript text — voice
@@ -782,6 +945,7 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 raise RuntimeError("No extracted audio available (audio extraction failed earlier)")
             session.voice_tone_analysis = analyze_voice_tone(candidate_wav_path)
         except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            logger.warning("Voice tone analysis failed for session %s: %s", session.id, exc)
             session.voice_tone_analysis = {"error": str(exc)}
 
         try:
@@ -789,10 +953,30 @@ def _process_recordings_and_save(session_id: uuid.UUID):
                 frame_paths = extract_frames(path)
                 session.facial_affect_analysis = analyze_facial_affect(frame_paths)
         except Exception as exc:  # noqa: BLE001 - best-effort, not core status
+            logger.warning("Facial affect analysis failed for session %s: %s", session.id, exc)
             session.facial_affect_analysis = {"error": str(exc)}
 
         db.add(session)
         db.commit()
+    except Exception as exc:  # noqa: BLE001 - last-resort backstop: without this, anything
+        # not already caught above (finalize_encrypt itself throwing, db.commit() failing,
+        # db.get() throwing before `session` is even assigned, ...) left transcript_status
+        # stuck at "pending" forever with nothing in server logs to explain why — the
+        # review page polls every 4s while it's "pending" with no timeout, so HR would
+        # just see it hang indefinitely. This turns that into a visible, terminal
+        # "failed" instead, logged here (see core/logging.py) rather than only ever
+        # existing as whatever happened to be in a developer's terminal at the time.
+        logger.exception("Post-interview processing failed for session %s", session_id)
+        if session is not None and session.transcript_status == "pending":
+            try:
+                session.transcript = f"Processing failed: {exc}"
+                session.transcript_status = "failed"
+                db.add(session)
+                db.commit()
+            except Exception:  # noqa: BLE001 - the DB itself may be what's actually down
+                logger.exception(
+                    "Also failed to record the processing failure for session %s", session_id
+                )
     finally:
         for wav_path in (candidate_wav_path, interviewer_wav_path):
             if wav_path:
@@ -849,21 +1033,10 @@ def complete_session(
 
     if session.recording_file_path:
         session.transcript_status = "pending"
-        # Encrypted here, once, now that the file is finished growing — append_file_chunk
-        # can't encrypt incrementally (see storage.py). The background task decrypts to a
-        # temp copy on demand for ffmpeg/whisper.
-        # Repair unfinalized/corrupted WebM chunks using ffmpeg prior to encryption
-        _repair_webm_container(session.recording_file_path)
-        if session.interviewer_recording_file_path:
-            _repair_webm_container(session.interviewer_recording_file_path)
-
-        # Encrypted here, once, now that the file is finished growing — append_file_chunk
-        # can't encrypt incrementally (see storage.py). The background task decrypts to a
-        # temp copy on demand for ffmpeg/whisper.
-        session.recording_file_path = storage.finalize_encrypt(session.recording_file_path)
-        session.interviewer_recording_file_path = storage.finalize_encrypt(
-            session.interviewer_recording_file_path
-        )
+        # Segment merging, WebM repair, and at-rest encryption all happen inside the
+        # background task now, not here — encrypting two 300MB recordings synchronously
+        # in this handler measured at ~5s of dead time the candidate's browser sat
+        # waiting on for the "Finish interview" click to resolve.
         background_tasks.add_task(_process_recordings_and_save, session.id)
 
     db.add(session)

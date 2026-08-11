@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { getJson, postForm, postJson } from "@/lib/api";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
+import { exitFullscreen, isFullscreenActive, requestFullscreen } from "@/lib/fullscreen";
 import type { FacialAffectAnalysis, InterviewSession, LiveSignalEvent, SignalType, VoiceToneAnalysis } from "@/lib/types";
 
 interface SentimentSample {
@@ -30,6 +31,7 @@ const SIGNAL_LABELS: Record<SignalType, string> = {
   screen_share_partial: "Shared a tab/window, not full screen",
   screen_share_stopped: "Stopped screen sharing",
   location_mismatch: "IP location doesn't match stated location",
+  ai_extension_detected: "AI answer-helper browser extension detected",
 };
 
 const DECISION_OPTIONS: { value: "proceed" | "concern" | "reject"; label: string; className: string }[] = [
@@ -80,6 +82,9 @@ export default function InterviewerCapturePage() {
   // Unmounting WebRTCRoom below is what actually ends the call and releases the camera/mic
   // it uses — there's no separate "hang up" button the way Jitsi's own toolbar had one.
   const [callEnded, setCallEnded] = useState(false);
+  // Gates mounting WebRTCRoom — it requests camera/mic and opens the signaling connection
+  // as soon as it mounts, so it must not render until the interviewer explicitly opts in.
+  const [joined, setJoined] = useState(false);
 
   useEffect(() => {
     getJson<InterviewSession>(`/interviews/interviewer-join/${token}`)
@@ -140,11 +145,19 @@ export default function InterviewerCapturePage() {
     }
   }
 
-  function stopRecording() {
+  // Canonical cleanup for both the "Stop recording" and "End call" buttons — they were
+  // previously two separate functions, and only stopRecording() actually released the
+  // interviewer's mic (recorderRef/streamRef, from startRecording()'s own independent
+  // getUserMedia call — separate from WebRTCRoom's, which unmounting already releases).
+  // Clicking "End call" directly while still recording, without "Stop recording" first,
+  // left that mic running indefinitely — the button did nothing but hide the call UI and
+  // set callEnded, which doesn't gate the recording panel below it at all.
+  function endCall() {
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     setRecording(false);
     setStopped(true);
+    if (isFullscreenActive()) exitFullscreen().catch(() => {});
     setCallEnded(true);
   }
 
@@ -208,6 +221,26 @@ export default function InterviewerCapturePage() {
 
         {callEnded ? (
           <p className="text-sm text-zinc-600">Call ended.</p>
+        ) : !joined ? (
+          <div className="space-y-3">
+            <p className="text-sm text-zinc-600">
+              Clicking below turns on your camera and microphone and connects you to the
+              candidate — nothing starts before that.
+            </p>
+            <button
+              onClick={() => {
+                // Fired synchronously in this click, same reasoning as the candidate
+                // page's own JoinGate/ScreenShareGate — must stay in the click's user
+                // gesture, not after an await. Previously this page had no fullscreen
+                // request at all, unlike the candidate side.
+                requestFullscreen().catch(() => {});
+                setJoined(true);
+              }}
+              className="btn-primary"
+            >
+              Join Meet
+            </button>
+          </div>
         ) : (
           <>
             <div className="w-full h-[420px]">
@@ -234,7 +267,7 @@ export default function InterviewerCapturePage() {
               <button onClick={requestMute} className="btn-outline text-xs px-2 py-1">
                 {muteRequestSent ? "Request sent" : "Ask candidate to mute"}
               </button>
-              <button onClick={() => setCallEnded(true)} className="btn-danger-outline text-xs px-2 py-1">
+              <button onClick={endCall} className="btn-danger-outline text-xs px-2 py-1">
                 End call
               </button>
             </div>
@@ -274,7 +307,7 @@ export default function InterviewerCapturePage() {
         ) : recording ? (
           <div className="space-y-3">
             <p className="text-sm text-purple-700 font-medium">● Recording…</p>
-            <button onClick={stopRecording} className="btn-danger-outline">
+            <button onClick={endCall} className="btn-danger-outline">
               Stop recording
             </button>
 

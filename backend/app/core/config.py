@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     livekit_api_key: str | None = None
     livekit_api_secret: str | None = None
 
+    # Root logger level (see core/logging.py) — DEBUG is noisy in normal operation but
+    # useful when actually chasing something like a background task failure.
+    log_level: str = "INFO"
+
     class Config:
         env_file = ".env"
 

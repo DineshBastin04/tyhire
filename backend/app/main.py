@@ -11,12 +11,15 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.v1 import api_router
 from app.core.config import settings
+from app.core.logging import setup_logging
 from app.db.session import Base, SessionLocal, engine
 from app import models  # noqa: F401 - ensures models are registered on Base before create_all
 from app.models.user import User
 from app.services.retention import purge_expired_identity_media
 
 logger = logging.getLogger(__name__)
+
+setup_logging()
 
 app = FastAPI(title="TyHire")
 
@@ -67,6 +70,7 @@ def on_startup():
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
     except Exception:
         pass
 
