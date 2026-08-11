@@ -12,25 +12,12 @@ export interface WebRTCApi {
   toggleMic: () => boolean;
   /** Toggles the local camera; returns the new camera-off state. */
   toggleCamera: () => boolean;
-  /** Interviewer-only: asks the candidate's page to mute itself. There's no way to force
-   * it — a raw 2-party connection has no server in the media path that could enforce a
-   * mute the way Jitsi's moderator role did — so this is a polite request, not a command. */
+  /** Interviewer-only: asks the candidate's page to mute itself. */
   requestPeerMute: () => void;
-  /** Tells the other participant's page the call is over from this end — sent explicitly
-   * because stopping local media here doesn't by itself close the peer's connection or
-   * signaling socket, so without this the other side would just sit on a frozen call with
-   * no idea it's over. See onPeerEnded for the receiving side. */
+  /** Tells the other participant's page the call is over from this end. */
   notifyPeerEnded: () => void;
 }
 
-/**
- * Requests camera/mic and opens the signaling connection as soon as this component
- * mounts — there is no internal "idle until told" gate. Both call sites (the candidate
- * and interviewer pages) rely on that: they show their own explicit "Join Meet" button
- * first and only render this component once it's clicked, rather than mounting it
- * immediately on page load. Don't render this behind a route/stage that isn't itself
- * gated on an explicit user action, or camera/mic + the call will start without consent.
- */
 interface WebRTCRoomProps {
   sessionId: string;
   token: string;
@@ -39,11 +26,6 @@ interface WebRTCRoomProps {
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
-  /** Fired when the other participant ends the call — either explicitly (they clicked
-   * their own end/finish button) or because their connection dropped (tab closed, crashed,
-   * network gone). Callers should react the same way they'd react to their own local
-   * end/finish action, so both sides always finalize their recording and wrap up together
-   * rather than one side being left on a dead call. */
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   livekitToken?: string | null;
@@ -56,8 +38,6 @@ function wsBaseUrl(): string {
   if (BASE_URL.startsWith("http")) return BASE_URL.replace(/^http/, "ws");
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   
-  // In local development, the Next.js dev server (port 3000) does not proxy WebSocket upgrades.
-  // Bypass it and connect directly to the FastAPI backend running on port 8000.
   if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
     return `${proto}//${window.location.hostname}:8000${BASE_URL}`;
   }
@@ -94,6 +74,8 @@ export default function WebRTCRoom({
         onMuteRequested={onMuteRequested}
         onPeerEnded={onPeerEnded}
         onPeerConnectedChange={onPeerConnectedChange}
+        enableEyeTracking={enableEyeTracking}
+        onGazeChange={onGazeChange}
       />
     );
   }
@@ -101,82 +83,73 @@ export default function WebRTCRoom({
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteScreenRef = useRef<HTMLVideoElement>(null);
-  const pendingScreenStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const [hasRemoteScreen, setHasRemoteScreen] = useState(false);
   const [peerPresent, setPeerPresent] = useState(false);
-  // Read via ref inside the connection effect below so passing a new track object doesn't
-  // need to (and shouldn't) tear down and rebuild the whole peer connection. The write
-  // itself has to happen in its own effect, not directly in the render body — mutating a
-  // ref during render is unsound (react-hooks/refs): render isn't guaranteed to run
-  // exactly once per commit (Strict Mode's double-invoke, future concurrent rendering),
-  // so a direct write here could apply more than once or be visible before the value it's
-  // based on is actually committed.
+
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const extraVideoTrackRef = useRef<MediaStreamTrack | null | undefined>(extraVideoTrack);
+  const tracksAddedRef = useRef(false);
+
   useEffect(() => {
     extraVideoTrackRef.current = extraVideoTrack;
-  }, [extraVideoTrack]);
-
-  // The screen-share <video> only renders once hasRemoteScreen flips true, so on the very
-  // first screen-share track the ref isn't attached yet when ontrack fires — stash the
-  // stream and apply it here once the element exists.
-  useEffect(() => {
-    if (hasRemoteScreen && remoteScreenRef.current && pendingScreenStreamRef.current) {
-      remoteScreenRef.current.srcObject = pendingScreenStreamRef.current;
+    if (extraVideoTrack && pcRef.current && tracksAddedRef.current) {
+      const senders = pcRef.current.getSenders();
+      const alreadyAdded = senders.some((s) => s.track === extraVideoTrack);
+      if (!alreadyAdded) {
+        pcRef.current.addTrack(extraVideoTrack, new MediaStream([extraVideoTrack]));
+      }
     }
-  }, [hasRemoteScreen]);
+  }, [extraVideoTrack]);
 
   useEffect(() => {
     let cancelled = false;
     let pc: RTCPeerConnection | null = null;
     let ws: WebSocket | null = null;
     let localStream: MediaStream | null = null;
-    let remoteCameraStreamId: string | null = null;
+    let remoteCameraTrackId: string | null = null;
 
-    // "Perfect negotiation" (MDN's recommended pattern): one side is designated polite so
-    // that if both sides happen to send an offer at once, there's a deterministic way to
-    // resolve it instead of the connection getting stuck. Arbitrary but fixed choice.
     const polite = role === "candidate";
     let makingOffer = false;
     let ignoreOffer = false;
-    let tracksAdded = false;
 
     function send(message: Record<string, unknown>) {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
     }
 
     async function start() {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 15, max: 24 }
-        },
-        audio: true
-      });
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
+            frameRate: { ideal: 15, max: 24 }
+          },
+          audio: true
+        });
+      } catch (e) {
+        console.warn("Could not acquire local camera/mic", e);
+      }
+
       if (cancelled) {
-        localStream.getTracks().forEach((t) => t.stop());
+        localStream?.getTracks().forEach((t) => t.stop());
         return;
       }
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
+      if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
 
       pc = new RTCPeerConnection({
         iceServers: (iceServers && iceServers.length > 0 ? iceServers : DEFAULT_ICE_SERVERS).map(
           (s) => ({ urls: s.urls, username: s.username, credential: s.credential })
         ),
       });
+      pcRef.current = pc;
 
-      // Tracks are added only once we know the peer is actually in the room (see the
-      // "peer-joined" handling below), not immediately here. addTrack() is what triggers
-      // onnegotiationneeded/the first offer — doing that before the signaling socket below
-      // has even finished connecting meant that first offer had nowhere to go and was
-      // silently lost, permanently stalling the connection with nothing to ever retry it.
       function addLocalTracks() {
-        if (tracksAdded || !pc || !localStream) return;
-        tracksAdded = true;
-        // All added synchronously in one batch (camera, mic, and — if already captured —
-        // screen) so the browser negotiates once, not across separate back-to-back
-        // renegotiations (see extraVideoTrack's doc comment on the collision that caused).
-        localStream.getTracks().forEach((track) => pc!.addTrack(track, localStream!));
+        if (tracksAddedRef.current || !pc) return;
+        tracksAddedRef.current = true;
+        if (localStream) {
+          localStream.getTracks().forEach((track) => pc!.addTrack(track, localStream!));
+        }
         if (extraVideoTrackRef.current) {
           pc.addTrack(extraVideoTrackRef.current, new MediaStream([extraVideoTrackRef.current]));
         }
@@ -203,16 +176,37 @@ export default function WebRTCRoom({
       };
 
       pc.ontrack = (event) => {
-        const stream = event.streams[0];
-        if (!stream) return;
-        if (!remoteCameraStreamId) remoteCameraStreamId = stream.id;
-        const isScreen = stream.id !== remoteCameraStreamId;
-        if (isScreen) {
-          pendingScreenStreamRef.current = stream;
-          if (remoteScreenRef.current) remoteScreenRef.current.srcObject = stream;
-          setHasRemoteScreen(true);
-        } else if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
-          remoteVideoRef.current.srcObject = stream;
+        const track = event.track;
+        if (track.kind === "audio") {
+          if (remoteAudioRef.current) {
+            const stream = event.streams[0] || new MediaStream([track]);
+            remoteAudioRef.current.srcObject = stream;
+            remoteAudioRef.current.play().catch(() => {});
+          }
+        } else if (track.kind === "video") {
+          const stream = event.streams[0] || new MediaStream([track]);
+          
+          if (!remoteCameraTrackId) {
+            remoteCameraTrackId = track.id;
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = stream;
+              remoteVideoRef.current.play().catch(() => {});
+            }
+          } else if (track.id !== remoteCameraTrackId) {
+            // Second video track received is the screenshare
+            if (remoteScreenRef.current) {
+              remoteScreenRef.current.srcObject = stream;
+              remoteScreenRef.current.play().catch(() => {});
+            }
+            setHasRemoteScreen(true);
+          }
+
+          track.onended = () => {
+            if (track.id !== remoteCameraTrackId) {
+              setHasRemoteScreen(false);
+              if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
+            }
+          };
         }
       };
 
@@ -247,18 +241,10 @@ export default function WebRTCRoom({
           onPeerConnectedChange?.(false);
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
           if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
-          pendingScreenStreamRef.current = null;
-          remoteCameraStreamId = null;
+          remoteCameraTrackId = null;
           setHasRemoteScreen(false);
-          // The peer's signaling socket closed — tab closed, crashed, or network gone. A
-          // real disconnect only ever fires this once (no flapping/reconnect logic on
-          // either side), so treating it as "the call is over" here is safe, and it's the
-          // only signal at all for a peer who closed their tab before explicitly ending.
           onPeerEnded?.();
         } else if (message.type === "call-ended") {
-          // Sent explicitly when the peer ends the call but stays on their page (e.g. to
-          // view a post-call scorecard) — their socket is still open, so "peer-left" above
-          // won't fire on its own.
           onPeerEnded?.();
         } else if (message.type === "offer" || message.type === "answer") {
           const description = { type: message.type, sdp: message.sdp } as RTCSessionDescriptionInit;
@@ -268,6 +254,7 @@ export default function WebRTCRoom({
           if (ignoreOffer) return;
           await pc!.setRemoteDescription(description);
           if (message.type === "offer") {
+            addLocalTracks();
             await pc!.setLocalDescription();
             send({ type: pc!.localDescription!.type, sdp: pc!.localDescription!.sdp });
           }
@@ -287,6 +274,7 @@ export default function WebRTCRoom({
 
     return () => {
       cancelled = true;
+      tracksAddedRef.current = false;
       ws?.close();
       pc?.close();
       localStream?.getTracks().forEach((t) => t.stop());
@@ -313,26 +301,27 @@ export default function WebRTCRoom({
   if (role === "interviewer") {
     return (
       <div className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3">
-        {/* Candidate Screenshare Viewport */}
+        <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+
+        {/* Candidate Screenshare Viewport (Always in DOM) */}
         <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
-          {hasRemoteScreen ? (
-            <>
-              <video
-                ref={remoteScreenRef}
-                autoPlay
-                playsInline
-                className="w-full h-full object-contain bg-zinc-950"
-              />
-              <div className="absolute top-2 left-2 px-2.5 py-1 rounded-md bg-white/90 shadow text-xs font-semibold text-zinc-800 border border-zinc-200 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
-                <span>🖥️ Candidate Screenshare (Live)</span>
-              </div>
-            </>
-          ) : (
+          <video
+            ref={remoteScreenRef}
+            autoPlay
+            playsInline
+            className={`w-full h-full object-contain bg-zinc-950 ${hasRemoteScreen ? "block" : "hidden"}`}
+          />
+          {hasRemoteScreen && (
+            <div className="absolute top-2 left-2 px-2.5 py-1 rounded-md bg-white/95 shadow text-xs font-semibold text-zinc-800 border border-zinc-200 flex items-center gap-1.5 z-10">
+              <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+              <span>🖥️ Candidate Screenshare (Live)</span>
+            </div>
+          )}
+          {!hasRemoteScreen && (
             <div className="flex flex-col items-center justify-center p-6 text-center text-zinc-400">
               <span className="text-3xl mb-2">🖥️</span>
-              <p className="text-xs font-medium">Candidate Screen Share</p>
-              <p className="text-[11px] text-zinc-500 mt-0.5">Waiting for candidate to start screen share…</p>
+              <p className="text-xs font-medium text-zinc-300">Candidate Screen Share</p>
+              <p className="text-[11px] text-zinc-500 mt-0.5">Waiting for candidate screen share stream…</p>
             </div>
           )}
         </div>
@@ -401,20 +390,19 @@ export default function WebRTCRoom({
 
   return (
     <div className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
+      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
       {!peerPresent && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
           Waiting for interviewer to join…
         </p>
       )}
       <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-contain" />
-      {hasRemoteScreen && (
-        <video
-          ref={remoteScreenRef}
-          autoPlay
-          playsInline
-          className="absolute inset-0 w-full h-full object-contain bg-black"
-        />
-      )}
+      <video
+        ref={remoteScreenRef}
+        autoPlay
+        playsInline
+        className={`absolute inset-0 w-full h-full object-contain bg-black ${hasRemoteScreen ? "block" : "hidden"}`}
+      />
       <div className="absolute bottom-2 right-2 w-28 h-20 rounded-lg overflow-hidden border border-white/40 shadow bg-black">
         <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
       </div>
@@ -432,6 +420,8 @@ function LiveKitRoomRenderer({
   onMuteRequested,
   onPeerEnded,
   onPeerConnectedChange,
+  enableEyeTracking,
+  onGazeChange,
 }: {
   sessionId: string;
   token: string;
@@ -442,6 +432,8 @@ function LiveKitRoomRenderer({
   onMuteRequested?: () => void;
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
+  enableEyeTracking?: boolean;
+  onGazeChange?: (isFocused: boolean, isTeleprompter?: boolean) => void;
 }) {
   const room = useMemo(() => new Room(), []);
 
@@ -506,8 +498,6 @@ function LiveKitRoomRenderer({
         if (msg.type === "mute-request") {
           onMuteRequested?.();
         } else if (msg.type === "call-ended") {
-          // Peer ended but is still connected to the room (e.g. reviewing a post-call
-          // scorecard) — RoomEvent.ParticipantDisconnected below won't fire on its own yet.
           onPeerEnded?.();
         }
       } catch (err) {
@@ -515,9 +505,6 @@ function LiveKitRoomRenderer({
       }
     };
 
-    // Backstop for a peer who closes their tab without explicitly ending first — LiveKit
-    // fires this once, server-detected, the same way the raw-WebRTC path's "peer-left"
-    // does, so it's safe to treat as "the call is over" here too.
     const handleParticipantDisconnected = () => onPeerEnded?.();
 
     room.on("dataReceived", handleData);
@@ -528,6 +515,64 @@ function LiveKitRoomRenderer({
     };
   }, [onMuteRequested, onPeerEnded, room]);
 
+  if (role === "interviewer") {
+    return (
+      <LiveKitRoom
+        room={room}
+        serverUrl={url}
+        token={token}
+        connect={true}
+        video={true}
+        audio={true}
+        className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3"
+      >
+        <RoomAudioRenderer />
+        {/* Candidate Screenshare Viewport */}
+        <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
+          {remoteScreen ? (
+            <>
+              <VideoTrack
+                trackRef={remoteScreen}
+                className="w-full h-full object-contain bg-zinc-950"
+              />
+              <div className="absolute top-2 left-2 px-2.5 py-1 rounded-md bg-white/95 shadow text-xs font-semibold text-zinc-800 border border-zinc-200 flex items-center gap-1.5 z-10">
+                <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+                <span>🖥️ Candidate Screenshare (Live)</span>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-col items-center justify-center p-6 text-center text-zinc-400">
+              <span className="text-3xl mb-2">🖥️</span>
+              <p className="text-xs font-medium text-zinc-300">Candidate Screen Share</p>
+              <p className="text-[11px] text-zinc-500 mt-0.5">Waiting for candidate screen share stream…</p>
+            </div>
+          )}
+        </div>
+
+        {/* Candidate Camera Viewport */}
+        <div className="relative w-full md:w-80 min-h-[220px] bg-zinc-900 rounded-xl overflow-hidden border-2 border-emerald-500 ring-2 ring-emerald-500/30">
+          {!peerPresent && (
+            <p className="absolute inset-0 flex items-center justify-center text-xs text-white/60">
+              Waiting for candidate to join…
+            </p>
+          )}
+          {remoteCamera && (
+            <VideoTrack
+              trackRef={remoteCamera}
+              className="w-full h-full object-cover"
+            />
+          )}
+          {localCamera && (
+            <VideoTrack
+              trackRef={localCamera}
+              className="absolute bottom-2 right-2 w-24 h-16 rounded-lg border border-white/40 shadow-md object-cover"
+            />
+          )}
+        </div>
+      </LiveKitRoom>
+    );
+  }
+
   return (
     <LiveKitRoom
       room={room}
@@ -536,12 +581,12 @@ function LiveKitRoomRenderer({
       connect={true}
       video={true}
       audio={true}
-      className="relative w-full h-full min-h-[360px] rounded-md bg-black overflow-hidden"
+      className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200"
     >
       <RoomAudioRenderer />
       {!peerPresent && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
-          Waiting for the other participant to join…
+          Waiting for interviewer to join…
         </p>
       )}
 
@@ -562,7 +607,7 @@ function LiveKitRoomRenderer({
       {localCamera && (
         <VideoTrack
           trackRef={localCamera}
-          className="absolute bottom-2 right-2 w-28 h-20 rounded border border-white/30 object-cover"
+          className="absolute bottom-2 right-2 w-28 h-20 rounded-lg border border-white/40 shadow object-cover"
         />
       )}
     </LiveKitRoom>
