@@ -21,7 +21,8 @@ services:
       - "3478:3478/udp"
       - "49160-49200:49160-49200/udp"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 3478 || exit 1"]
+      # coturn/coturn doesn't ship `nc` — use bash's /dev/tcp instead of relying on netcat.
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/3478' || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10
