@@ -52,28 +52,31 @@ _retention_task: asyncio.Task | None = None
 def on_startup():
     Base.metadata.create_all(bind=engine)
     
-    # Ensure database columns exist dynamically (lightweight migration for SQLite)
+    # Dynamic database column migrations for existing PostgreSQL / SQLite databases
     from sqlalchemy import text
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS qa_evaluations JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE identity_checks ADD COLUMN IF NOT EXISTS voice_enrollment_path VARCHAR;"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
+    except Exception as exc:
+        logger.debug("PostgreSQL startup migration notice: %s", exc)
+
+    # SQLite fallback column check
     db = SessionLocal()
+    try:
+        db.execute(text("ALTER TABLE interview_sessions ADD COLUMN qa_evaluations JSON DEFAULT '[]';"))
+        db.commit()
+    except Exception:
+        pass
     try:
         db.execute(text("ALTER TABLE identity_checks ADD COLUMN voice_enrollment_path VARCHAR;"))
         db.commit()
     except Exception:
         pass
-
     db.close()
-
-    # Ensure Postgres enum has 'voice_mismatch' added — ALTER TYPE ... ADD VALUE must run
-    # outside any transaction block, which SQLAlchemy only honors via
-    # Connection.execution_options(isolation_level=...); passing it on the statement itself
-    # (Executable.execution_options()) raises ArgumentError instead of applying anything.
-    try:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
-            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
-            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
-    except Exception:
-        pass
 
     _bootstrap_initial_admin()
 
