@@ -165,6 +165,7 @@ def _summarize(distinct_types: set[SignalType], cluster: list[SignalEvent]) -> s
         SignalType.screen_share_stopped: "Stopped screen sharing mid-interview",
         SignalType.location_mismatch: "IP-resolved location doesn't match stated location",
         SignalType.ai_extension_detected: "AI answer-helper browser extension detected",
+        SignalType.teleprompter_reading: "Teleprompter / Script-reading eye motion pattern",
     }
     duration_s = round((cluster[-1].session_offset_ms - cluster[0].session_offset_ms) / 1000, 1)
     parts = " + ".join(labels[t] for t in distinct_types)

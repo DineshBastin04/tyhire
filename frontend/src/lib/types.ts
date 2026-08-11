@@ -182,7 +182,8 @@ export type SignalType =
   | "screen_share_partial"
   | "screen_share_stopped"
   | "location_mismatch"
-  | "ai_extension_detected";
+  | "ai_extension_detected"
+  | "teleprompter_reading";
 
 export interface LiveSignalEvent {
   signal_type: SignalType;

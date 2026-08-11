@@ -38,7 +38,7 @@ interface WebRTCRoomProps {
   livekitToken?: string | null;
   livekitUrl?: string | null;
   enableEyeTracking?: boolean;
-  onGazeChange?: (isFocused: boolean) => void;
+  onGazeChange?: (isFocused: boolean, isTeleprompter?: boolean) => void;
 }
 
 function wsBaseUrl(): string {

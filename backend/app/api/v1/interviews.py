@@ -57,8 +57,12 @@ from app.schemas.interview import (
     LiveTranscriptIn,
     LiveTranscriptOut,
     SendConsolidatedReportRequest,
+    EvaluateLiveAnswerRequest,
+    RateQuestionAnswerRequest,
 )
 import io
+from app.models.candidate import Candidate
+from app.models.job import Job
 from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
 from app.services.retention import purge_expired_identity_media
 from app.services.audio_extract import extract_audio_wav
@@ -70,6 +74,8 @@ from app.services.transcription import transcribe_with_segments
 from app.services.video_extract import extract_frames
 from app.services.voice_tone import analyze_voice_tone
 from app.services.livekit_service import generate_livekit_token
+from app.services.question_generator import generate_suggested_questions
+from app.services.answer_evaluator import evaluate_live_answer
 from app.services.consolidated_report import (
     build_consolidated_report,
     build_consolidated_report_pdf,
@@ -80,6 +86,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory buffer for real-time live transcription stream during active calls
 _live_transcripts: dict[str, list[dict]] = {}
+_session_questions_cache: dict[str, list[dict]] = {}
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -1156,3 +1163,110 @@ def download_consolidated_report_pdf(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{session_id}/suggested-questions")
+def get_suggested_interview_questions(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Generates or returns cached AI-suggested questions tailored to the candidate and job."""
+    sid = str(session_id)
+    if sid in _session_questions_cache and _session_questions_cache[sid]:
+        return _session_questions_cache[sid]
+
+    session = db.get(InterviewSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+
+    job = db.get(Job, session.job_id) if session.job_id else None
+    candidate = db.get(Candidate, session.candidate_id) if session.candidate_id else None
+
+    job_title = job.title if job else "Technical Specialist"
+    jd_text = job.jd_text if job else "Standard technical requirements"
+    skills = job.required_skills if job else []
+    profile = candidate.parsed_profile if candidate else None
+
+    questions = generate_suggested_questions(
+        job_title=job_title,
+        jd_text=jd_text,
+        required_skills=skills,
+        candidate_profile=profile,
+        candidate_name=session.candidate_name,
+    )
+    _session_questions_cache[sid] = questions
+    return questions
+
+
+@router.post("/{session_id}/evaluate-live-answer")
+def evaluate_candidate_live_answer(
+    session_id: uuid.UUID,
+    payload: EvaluateLiveAnswerRequest,
+    db: Session = Depends(get_db),
+):
+    """Evaluates candidate spoken answer against the active question in real time."""
+    session = db.get(InterviewSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+
+    job = db.get(Job, session.job_id) if session.job_id else None
+    job_context = f"{job.title} ({', '.join(job.required_skills)})" if job else "Technical Role"
+
+    evaluation = evaluate_live_answer(
+        question_text=payload.question_text,
+        expected_concepts=payload.expected_concepts,
+        candidate_transcript=payload.candidate_transcript,
+        job_context=job_context,
+    )
+    return evaluation
+
+
+@router.post("/{session_id}/rate-question-answer")
+def rate_question_answer(
+    session_id: uuid.UUID,
+    payload: RateQuestionAnswerRequest,
+    db: Session = Depends(get_db),
+):
+    """Stores the interviewer's then-and-there rating and accuracy assessment for an individual question."""
+    session = db.get(InterviewSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+
+    existing_evals = list(session.qa_evaluations or [])
+    # Check if this question was already rated, update or append
+    updated = False
+    record = {
+        "question_id": payload.question_id,
+        "question_text": payload.question_text,
+        "rating": payload.rating,
+        "accuracy_score": payload.accuracy_score,
+        "notes": payload.notes,
+        "concepts_covered": payload.concepts_covered,
+        "concepts_missing": payload.concepts_missing,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    for idx, item in enumerate(existing_evals):
+        if item.get("question_id") == payload.question_id:
+            existing_evals[idx] = record
+            updated = True
+            break
+    if not updated:
+        existing_evals.append(record)
+
+    session.qa_evaluations = existing_evals
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {"status": "ok", "qa_evaluations": session.qa_evaluations}
+
+
+@router.get("/{session_id}/qa-evaluations")
+def get_qa_evaluations(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Returns recorded question evaluations and accuracy scores."""
+    session = db.get(InterviewSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    return session.qa_evaluations or []

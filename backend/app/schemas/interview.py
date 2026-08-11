@@ -180,3 +180,21 @@ class LiveTranscriptOut(BaseModel):
 class SendConsolidatedReportRequest(BaseModel):
     recipient_email: Optional[str] = None
 
+
+class EvaluateLiveAnswerRequest(BaseModel):
+    question_id: str
+    question_text: str
+    expected_concepts: list[str] = []
+    candidate_transcript: str
+
+
+class RateQuestionAnswerRequest(BaseModel):
+    question_id: str
+    question_text: str
+    rating: str  # "strong_pass" | "needs_followup" | "inaccurate_scripted"
+    accuracy_score: Optional[float] = None
+    notes: Optional[str] = None
+    concepts_covered: list[str] = []
+    concepts_missing: list[str] = []
+
+

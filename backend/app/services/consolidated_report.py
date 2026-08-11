@@ -80,6 +80,7 @@ def build_consolidated_report(db: Session, session_id: uuid.UUID) -> dict[str, A
         "voice_tone_analysis": session.voice_tone_analysis,
         "facial_affect_analysis": session.facial_affect_analysis,
         "qa_analysis": session.qa_analysis,
+        "qa_evaluations": session.qa_evaluations or [],
         "interviewer_decision": session.interviewer_live_decision,
         "interviewer_notes": session.interviewer_live_notes,
         "transcript_preview": (session.merged_transcript or session.transcript or "")[:2000],
@@ -180,7 +181,27 @@ def build_consolidated_report_pdf(report: dict[str, Any]) -> bytes:
         pdf.cell(0, 5, f"Facial Affect: {affect.capitalize()} (Tension Level: {tension})", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
-    # Q&A Exchanges
+    # Q&A Exchanges & Evaluated Question Accuracy Breakdown
+    qa_evals = report.get("qa_evaluations") or []
+    if qa_evals:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 7, f"AI-Evaluated Question Scorecard ({len(qa_evals)} questions)", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        for ev in qa_evals[:6]:
+            q_txt = _sanitize(ev.get("question_text", "Question"))
+            score = ev.get("accuracy_score")
+            score_str = f"Accuracy: {score:.0f}/100" if score is not None else "Accuracy: Pending"
+            rating = _sanitize(str(ev.get("rating", "")).replace("_", " ").capitalize())
+            notes = _sanitize(ev.get("notes", "") or "")
+
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.multi_cell(0, 5, f"Q: {q_txt} [{score_str} | Rating: {rating}]", new_x="LMARGIN", new_y="NEXT")
+            if notes:
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.multi_cell(0, 4, f"  Notes: {notes}", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1)
+        pdf.ln(2)
+
     qa = report.get("qa_analysis")
     if qa and isinstance(qa, dict) and qa.get("exchanges"):
         pdf.set_font("Helvetica", "B", 12)

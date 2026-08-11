@@ -71,6 +71,7 @@ def on_startup():
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
     except Exception:
         pass
 

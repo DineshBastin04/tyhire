@@ -90,6 +90,9 @@ class InterviewSession(Base):
     interviewer_live_decision = Column(String, nullable=True)  # "proceed" | "concern" | "reject"
     interviewer_live_notes = Column(Text, nullable=True)
 
+    # Per-question GPT evaluations, accuracy scores, and interviewer "then & there" ratings
+    qa_evaluations = Column(JSON, nullable=False, default=list)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -143,6 +146,8 @@ class SignalType(str, enum.Enum):
     # extensions (Monica AI, Sider, Merlin, and similar ChatGPT-sidebar-style tools)
     # injecting their own elements into the page during the interview.
     ai_extension_detected = "ai_extension_detected"
+    # Teleprompter / script-reading saccade eye scanning detection
+    teleprompter_reading = "teleprompter_reading"
 
 
 class SignalEvent(Base):
