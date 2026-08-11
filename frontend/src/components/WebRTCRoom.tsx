@@ -5,6 +5,7 @@ import { BASE_URL } from "@/lib/api";
 import type { IceServer } from "@/lib/types";
 import { LiveKitRoom, RoomAudioRenderer, useTracks, VideoTrack } from "@livekit/components-react";
 import { Track, Room } from "livekit-client";
+import EyeTrackingOverlay from "@/components/EyeTrackingOverlay";
 
 export interface WebRTCApi {
   /** Toggles the local mic; returns the new muted state. */
@@ -36,6 +37,8 @@ interface WebRTCRoomProps {
   onPeerConnectedChange?: (connected: boolean) => void;
   livekitToken?: string | null;
   livekitUrl?: string | null;
+  enableEyeTracking?: boolean;
+  onGazeChange?: (isFocused: boolean) => void;
 }
 
 function wsBaseUrl(): string {
@@ -64,6 +67,8 @@ export default function WebRTCRoom({
   onPeerConnectedChange,
   livekitToken,
   livekitUrl,
+  enableEyeTracking = false,
+  onGazeChange,
 }: WebRTCRoomProps) {
   if (livekitToken && livekitUrl) {
     return (
@@ -273,6 +278,9 @@ export default function WebRTCRoom({
         </p>
       )}
       <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-contain" />
+      {enableEyeTracking && role === "interviewer" && (
+        <EyeTrackingOverlay videoRef={remoteVideoRef} onGazeChange={onGazeChange} />
+      )}
       {hasRemoteScreen && (
         <video
           ref={remoteScreenRef}
@@ -288,6 +296,9 @@ export default function WebRTCRoom({
         muted
         className="absolute bottom-2 right-2 w-28 h-20 rounded border border-white/30 object-cover"
       />
+      {enableEyeTracking && role === "candidate" && (
+        <EyeTrackingOverlay videoRef={localVideoRef} mirrored={true} onGazeChange={onGazeChange} />
+      )}
     </div>
   );
 }

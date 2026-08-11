@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 
@@ -6,20 +7,51 @@ def extract_frames(video_path: str, count: int = 3) -> list[str]:
     """Pulls `count` evenly-spaced JPEG frames out of a video for still-image analysis.
     Duration is probed first so the frames are actually spread across the recording rather
     than all landing in, say, the first second."""
+    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+        return []
+
     duration = _probe_duration_seconds(video_path)
     frame_paths = []
+
+    # If duration is 0 or very small, just pull whatever frame is available
+    if duration <= 0.1:
+        output_path = f"{video_path.rsplit('.', 1)[0]}_frame0.jpg"
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-err_detect", "ignore_err", "-i", video_path, "-frames:v", "1", output_path],
+            capture_output=True,
+        )
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return [output_path]
+        return []
 
     for i in range(count):
         # Skip the very start/end — spread frames across the middle of the recording.
         fraction = (i + 1) / (count + 1)
-        timestamp = duration * fraction
+        timestamp = max(0.0, duration * fraction)
         output_path = f"{video_path.rsplit('.', 1)[0]}_frame{i}.jpg"
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", str(timestamp), "-i", video_path, "-frames:v", "1", output_path],
-            check=True,
+
+        # Primary attempt: decode-accurate seeking after -i (avoids container keyframe/cue index seek crash)
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-err_detect", "ignore_err", "-i", video_path, "-ss", f"{timestamp:.3f}", "-frames:v", "1", output_path],
             capture_output=True,
         )
-        frame_paths.append(output_path)
+
+        # Fallback 1: fast seek before -i
+        if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-err_detect", "ignore_err", "-ss", f"{timestamp:.3f}", "-i", video_path, "-frames:v", "1", output_path],
+                capture_output=True,
+            )
+
+        # Fallback 2: extract frame from beginning (timestamp=0) if seek failed due to keyframe/EOF
+        if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-err_detect", "ignore_err", "-i", video_path, "-frames:v", "1", output_path],
+                capture_output=True,
+            )
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            frame_paths.append(output_path)
 
     return frame_paths
 

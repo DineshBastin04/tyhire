@@ -22,6 +22,7 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth import require_admin, require_hr_auth
@@ -53,7 +54,11 @@ from app.schemas.interview import (
     SignalEventIn,
     SignalEventOut,
     StartSessionResponse,
+    LiveTranscriptIn,
+    LiveTranscriptOut,
+    SendConsolidatedReportRequest,
 )
+import io
 from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
 from app.services.retention import purge_expired_identity_media
 from app.services.audio_extract import extract_audio_wav
@@ -65,8 +70,16 @@ from app.services.transcription import transcribe_with_segments
 from app.services.video_extract import extract_frames
 from app.services.voice_tone import analyze_voice_tone
 from app.services.livekit_service import generate_livekit_token
+from app.services.consolidated_report import (
+    build_consolidated_report,
+    build_consolidated_report_pdf,
+    send_consolidated_report,
+)
 
 logger = logging.getLogger(__name__)
+
+# In-memory buffer for real-time live transcription stream during active calls
+_live_transcripts: dict[str, list[dict]] = {}
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -264,9 +277,22 @@ def cleanup_expired_media(db: Session = Depends(get_db)):
     "/review/queue", response_model=list[SessionOut], dependencies=[Depends(require_hr_auth)]
 )
 def review_queue(db: Session = Depends(get_db)):
+    """Surfaces both integrity-score-flagged sessions (set at /complete) and sessions with an
+    unresolved identity mismatch that was hard-passed through /start — since a mismatch no
+    longer blocks the interview (see start_session), this is the only place it still reaches
+    HR. Clearing it via POST .../identity-check/override removes it from here."""
+    unresolved_identity_mismatch = db.query(IdentityCheck.session_id).filter(
+        IdentityCheck.needs_human_review == True,  # noqa: E712
+        IdentityCheck.cleared_by_hr == False,  # noqa: E712
+    )
     return (
         db.query(InterviewSession)
-        .filter(InterviewSession.integrity_needs_review == True)  # noqa: E712
+        .filter(
+            or_(
+                InterviewSession.integrity_needs_review == True,  # noqa: E712
+                InterviewSession.id.in_(unresolved_identity_mismatch),
+            )
+        )
         .order_by(InterviewSession.completed_at.desc())
         .all()
     )
@@ -486,15 +512,21 @@ def start_session(
             status_code=409,
             detail="Identity verification has not been completed for this interview.",
         )
-    # needs_human_review already covers no_match, uncertain, AND failed liveness (see
-    # submit_identity_check) — gating on the literal "no_match" string here let uncertain
-    # verdicts and failed-liveness submissions start unblocked. cleared_by_hr is the one
-    # designed override for all three, so it stays the sole way past this.
+    # A no_match/uncertain/failed-liveness verdict is a soft pass, not a hard block: the
+    # candidate proceeds into the interview, but the session lands in HR's review queue (see
+    # review_queue below) and this decision is audit-logged here, so HR has something to act
+    # on afterward instead of the candidate being stuck until someone clears cleared_by_hr.
     if latest_check.needs_human_review and not latest_check.cleared_by_hr:
-        raise HTTPException(
-            status_code=409,
-            detail="Identity verification did not match. Contact HR to proceed.",
-        )
+        db.add(AuditLog(
+            interview_session_id=session.id,
+            actor="system",
+            action="identity_check_hard_pass",
+            detail={
+                "verdict": latest_check.match_verdict,
+                "confidence": latest_check.match_confidence,
+            },
+        ))
+        db.commit()
 
     # Both gates passed — the interview is actually beginning now, so advance the session out
     # of any pre-start state. Without this a session that required HR identity review stayed
@@ -539,8 +571,10 @@ def override_identity_check(
     db: Session = Depends(get_db),
     current_hr_user: dict = Depends(require_hr_auth),
 ):
-    """Clears a no_match verdict as a false positive (bad lighting/angle), unblocking
-    POST /start — never auto-clears; only human review of the actual images does."""
+    """Marks a no_match verdict as reviewed (false positive or otherwise handled), removing
+    it from the review queue — never auto-clears; only human review of the actual images
+    does. /start no longer blocks on this either way (see start_session), so this is now
+    about closing out the review queue entry, not unblocking the candidate."""
     check = (
         db.query(IdentityCheck)
         .filter(IdentityCheck.session_id == session_id)
@@ -1043,3 +1077,82 @@ def complete_session(
     db.commit()
     db.refresh(session)
     return session
+
+
+@router.post("/{session_id}/live-transcript")
+def push_live_transcript(
+    session_id: uuid.UUID,
+    payload: LiveTranscriptIn,
+    db: Session = Depends(get_db),
+):
+    """Buffers live streaming speech utterances in real time for interviewer display."""
+    sid = str(session_id)
+    if sid not in _live_transcripts:
+        _live_transcripts[sid] = []
+
+    item = {
+        "id": f"{uuid.uuid4().hex[:8]}",
+        "speaker": payload.speaker,
+        "text": payload.text.strip(),
+        "offset_ms": payload.offset_ms,
+        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+    }
+    _live_transcripts[sid].append(item)
+    if len(_live_transcripts[sid]) > 250:
+        _live_transcripts[sid] = _live_transcripts[sid][-250:]
+
+    return {"status": "ok", "item": item}
+
+
+@router.get("/{session_id}/live-transcripts", response_model=list[LiveTranscriptOut])
+def get_live_transcripts(
+    session_id: uuid.UUID,
+    session: InterviewSession = Depends(require_interviewer_token),
+):
+    """Returns recent live real-time transcript utterances for the interviewer panel."""
+    sid = str(session_id)
+    return _live_transcripts.get(sid, [])
+
+
+@router.get("/{session_id}/consolidated-report")
+def get_consolidated_report(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Returns the consolidated scorecard and evaluation report."""
+    try:
+        return build_consolidated_report(db, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/{session_id}/send-report")
+def trigger_send_consolidated_report(
+    session_id: uuid.UUID,
+    payload: SendConsolidatedReportRequest,
+    db: Session = Depends(get_db),
+):
+    """Dispatches the consolidated scorecard and PDF report to the interviewer."""
+    recipient = payload.recipient_email or "interviewer@company.com"
+    try:
+        return send_consolidated_report(db, session_id, recipient)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{session_id}/consolidated-report/pdf")
+def download_consolidated_report_pdf(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Downloads the consolidated interview evaluation PDF."""
+    try:
+        report = build_consolidated_report(db, session_id)
+        pdf_bytes = build_consolidated_report_pdf(report)
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="evaluation_{session_id}.pdf"'},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

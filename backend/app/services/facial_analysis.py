@@ -41,6 +41,13 @@ SYSTEM_PROMPT = (
 
 
 def analyze_facial_affect(frame_paths: list[str]) -> dict:
+    if not frame_paths:
+        return {
+            "face_visible": False,
+            "overall_affect": "unknown",
+            "tension_level": "low",
+            "notes": "No frames could be extracted from recording for facial affect analysis.",
+        }
     content = [
         {"type": "text", "text": f"{len(frame_paths)} frames from one candidate's interview recording, in order:"}
     ]

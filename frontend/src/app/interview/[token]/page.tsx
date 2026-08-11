@@ -12,6 +12,7 @@ import {
   onFullscreenChange as watchFullscreenChange,
   requestFullscreen,
 } from "@/lib/fullscreen";
+import { useLiveSpeech } from "@/lib/useLiveSpeech";
 import type { InterviewSession, SignalType } from "@/lib/types";
 
 type Stage =
@@ -564,11 +565,11 @@ function StartGate({ session, onReady }: { session: InterviewSession; onReady: (
       <Centered>
         <span className="block space-y-3">
           <span className="block">
-            Identity verification didn&apos;t match. Please contact HR before continuing — do
-            not close this window until you&apos;ve been in touch with them.
+            Identity verification hasn&apos;t been completed yet. Go back and finish the ID
+            and selfie step, or contact HR if this keeps happening.
           </span>
           <button onClick={retry} className="btn-primary">
-            I&apos;ve spoken to HR — try again
+            Try again
           </button>
         </span>
       </Centered>
@@ -644,6 +645,16 @@ function InterviewRecorder({
   const [micMuted, setMicMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [muteRequested, setMuteRequested] = useState(false);
+
+  // Live Speech Recognition: stream candidate's speech to interviewer live transcript panel
+  useLiveSpeech({
+    sessionId: session.id,
+    speaker: "candidate",
+    enabled: recordingStarted,
+    startedAtMs: startRef.current,
+    authToken: session.join_token,
+    tokenHeaderKey: "X-Interview-Token",
+  });
 
   function toggleMic() {
     setMicMuted(webrtcApiRef.current?.toggleMic() ?? false);
@@ -956,6 +967,7 @@ function InterviewRecorder({
           role="candidate"
           iceServers={session.ice_servers}
           extraVideoTrack={screenTrack}
+          enableEyeTracking={true}
           onApiReady={(api) => {
             webrtcApiRef.current = api;
           }}

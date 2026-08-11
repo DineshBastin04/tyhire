@@ -161,3 +161,22 @@ class IntegrityFlagOut(BaseModel):
 class ReviewDecision(BaseModel):
     decision: str  # "cleared" | "confirmed_issue"
     note: Optional[str] = None
+
+
+class LiveTranscriptIn(BaseModel):
+    speaker: str  # "candidate" | "interviewer"
+    text: str
+    offset_ms: int = 0
+
+
+class LiveTranscriptOut(BaseModel):
+    id: str
+    speaker: str
+    text: str
+    offset_ms: int
+    timestamp: str
+
+
+class SendConsolidatedReportRequest(BaseModel):
+    recipient_email: Optional[str] = None
+
