@@ -503,7 +503,7 @@ export default function InterviewerCapturePage() {
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 max-w-[1600px] w-full mx-auto">
           {/* Left Column: Two-Part Video/Screenshare & Active Question / Then-and-There Decision */}
           <div className="lg:col-span-7 flex flex-col gap-3">
-            <div className="relative w-full h-[400px] bg-white rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
+            <div className="relative w-full h-[450px] bg-white rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
               {!callEnded ? (
                 <WebRTCRoom
                   sessionId={session.id}

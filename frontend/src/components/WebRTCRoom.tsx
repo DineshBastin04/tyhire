@@ -222,6 +222,19 @@ export default function WebRTCRoom({
             setHasRemoteScreen(true);
           }
 
+          track.onunmute = () => {
+            if (track.id !== remoteCameraTrackId) {
+              setHasRemoteScreen(true);
+              if (remoteScreenRef.current) {
+                remoteScreenRef.current.srcObject = stream;
+                remoteScreenRef.current.play().catch(() => {});
+              }
+            } else if (remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = stream;
+              remoteVideoRef.current.play().catch(() => {});
+            }
+          };
+
           track.onended = () => {
             if (track.id !== remoteCameraTrackId) {
               setHasRemoteScreen(false);
@@ -352,6 +365,7 @@ export default function WebRTCRoom({
             ref={remoteScreenRef}
             autoPlay
             playsInline
+            muted
             className={`w-full h-full object-contain bg-zinc-950 ${hasRemoteScreen ? "block" : "hidden"}`}
           />
           {hasRemoteScreen && (
@@ -382,6 +396,7 @@ export default function WebRTCRoom({
             ref={remoteVideoRef}
             autoPlay
             playsInline
+            muted
             className="w-full h-full object-cover"
           />
           {enableEyeTracking && (
