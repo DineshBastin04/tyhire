@@ -1114,7 +1114,7 @@ def push_live_transcript(
 @router.get("/{session_id}/live-transcripts", response_model=list[LiveTranscriptOut])
 def get_live_transcripts(
     session_id: uuid.UUID,
-    session: InterviewSession = Depends(require_interviewer_token),
+    db: Session = Depends(get_db),
 ):
     """Returns recent live real-time transcript utterances for the interviewer panel."""
     sid = str(session_id)

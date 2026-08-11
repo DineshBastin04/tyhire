@@ -1,6 +1,7 @@
 "use client";
 
 import { useParams } from "next/navigation";
+import Image from "next/image";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
@@ -70,9 +71,9 @@ const SIGNAL_LABELS: Record<SignalType, string> = {
 };
 
 const DECISION_OPTIONS: { value: "proceed" | "concern" | "reject"; label: string; className: string }[] = [
-  { value: "proceed", label: "Proceed", className: "bg-emerald-600 hover:bg-emerald-700 text-white font-medium" },
-  { value: "concern", label: "Some concern", className: "bg-amber-600 hover:bg-amber-700 text-white font-medium" },
-  { value: "reject", label: "Reject", className: "bg-red-600 hover:bg-red-700 text-white font-medium" },
+  { value: "proceed", label: "Proceed", className: "bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-sm" },
+  { value: "concern", label: "Some concern", className: "bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-sm" },
+  { value: "reject", label: "Reject", className: "bg-red-600 hover:bg-red-700 text-white font-medium shadow-sm" },
 ];
 
 function formatOffset(ms: number): string {
@@ -111,6 +112,10 @@ export default function InterviewerCapturePage() {
   const [sendingEmail, setSendingEmail] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [emailRecipient, setEmailRecipient] = useState("");
+  const [closeFailed, setCloseFailed] = useState(false);
+
+  // Manual test utterance input
+  const [manualUtterance, setManualUtterance] = useState("");
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -188,10 +193,12 @@ export default function InterviewerCapturePage() {
       getJson<SentimentSample[]>(`/interviews/${session.id}/live-sentiment`, {
         "X-Interviewer-Token": session.interviewer_join_token ?? "",
       })
-        .then(setSentimentSamples)
+        .then((samples) => {
+          if (samples && samples.length > 0) setSentimentSamples(samples);
+        })
         .catch(() => {});
     poll();
-    const interval = setInterval(poll, 10000);
+    const interval = setInterval(poll, 8000);
     return () => clearInterval(interval);
   }, [session, callEnded]);
 
@@ -199,9 +206,7 @@ export default function InterviewerCapturePage() {
   useEffect(() => {
     if (!session || callEnded) return;
     const poll = () =>
-      getJson<LiveTranscriptItem[]>(`/interviews/${session.id}/live-transcripts`, {
-        "X-Interviewer-Token": session.interviewer_join_token ?? "",
-      })
+      getJson<LiveTranscriptItem[]>(`/interviews/${session.id}/live-transcripts`)
         .then((items) => {
           if (items && items.length > 0) {
             setMergedLiveTranscripts(items);
@@ -218,15 +223,20 @@ export default function InterviewerCapturePage() {
     : interviewerTranscriptItems;
 
   // Real-time answer evaluation trigger
-  const runAnswerEvaluation = useCallback(async () => {
+  const runAnswerEvaluation = useCallback(async (customSpeech?: string) => {
     if (!session || !activeQuestion) return;
-    // Collect candidate spoken text
-    const candidateSpeech = allTranscripts
-      .filter((t) => t.speaker === "candidate")
-      .map((t) => t.text)
-      .join(" ");
 
-    if (candidateSpeech.length < 15) return;
+    let candidateSpeech = customSpeech;
+    if (!candidateSpeech) {
+      candidateSpeech = allTranscripts
+        .filter((t) => t.speaker === "candidate")
+        .map((t) => t.text)
+        .join(" ");
+    }
+
+    if (!candidateSpeech || candidateSpeech.length < 8) {
+      return;
+    }
 
     setEvaluatingAnswer(true);
     try {
@@ -269,6 +279,22 @@ export default function InterviewerCapturePage() {
     } catch {}
   }
 
+  async function handleSendManualUtterance(speaker: "candidate" | "interviewer") {
+    if (!session || !manualUtterance.trim()) return;
+    const text = manualUtterance.trim();
+    setManualUtterance("");
+    try {
+      await postJson(`/interviews/${session.id}/live-transcript`, {
+        speaker,
+        text,
+        offset_ms: Date.now() - callStartTime,
+      });
+      if (speaker === "candidate" && activeQuestion) {
+        runAnswerEvaluation(text);
+      }
+    } catch {}
+  }
+
   const loadConsolidatedReport = useCallback(async () => {
     if (!session) return;
     try {
@@ -303,7 +329,10 @@ export default function InterviewerCapturePage() {
     }
   }
 
-  function endCall() {
+  function endCall(notifyPeer = true) {
+    if (notifyPeer) {
+      webrtcApiRef.current?.notifyPeerEnded();
+    }
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     setRecording(false);
@@ -311,6 +340,11 @@ export default function InterviewerCapturePage() {
     if (isFullscreenActive()) exitFullscreen().catch(() => {});
     setCallEnded(true);
     setTimeout(loadConsolidatedReport, 1000);
+  }
+
+  function handleCloseTab() {
+    window.close();
+    setTimeout(() => setCloseFailed(true), 300);
   }
 
   function toggleMic() {
@@ -359,9 +393,9 @@ export default function InterviewerCapturePage() {
 
   if (error) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6 bg-zinc-950 min-h-screen text-white">
-        <div className="max-w-md p-6 bg-zinc-900 border border-zinc-800 rounded-xl text-center shadow-2xl">
-          <p className="text-red-400 font-medium">{error}</p>
+      <div className="flex flex-1 items-center justify-center p-6 bg-zinc-50 min-h-screen text-zinc-900">
+        <div className="max-w-md p-6 bg-white border border-zinc-200 rounded-xl text-center shadow-md">
+          <p className="text-red-600 font-medium">{error}</p>
         </div>
       </div>
     );
@@ -369,9 +403,9 @@ export default function InterviewerCapturePage() {
 
   if (!session) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6 bg-zinc-950 min-h-screen text-white">
-        <div className="flex items-center gap-3 text-zinc-400">
-          <span className="w-5 h-5 border-2 border-zinc-400 border-t-transparent rounded-full animate-spin"></span>
+      <div className="flex flex-1 items-center justify-center p-6 bg-zinc-50 min-h-screen text-zinc-900">
+        <div className="flex items-center gap-3 text-zinc-500">
+          <span className="w-5 h-5 border-2 border-zinc-300 border-t-blue-600 rounded-full animate-spin"></span>
           <span>Loading Interviewer Command Center…</span>
         </div>
       </div>
@@ -381,36 +415,37 @@ export default function InterviewerCapturePage() {
   const latestSentiment = sentimentSamples.length > 0 ? sentimentSamples[0] : null;
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-zinc-100 font-sans">
-      {/* Top Header */}
-      <header className="flex items-center justify-between px-6 py-3.5 bg-zinc-900/90 backdrop-blur-md border-b border-zinc-800 shrink-0 sticky top-0 z-20">
-        <div className="flex items-center gap-3">
-          <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_#22c55e]" />
+    <div className="flex flex-col min-h-screen bg-zinc-50 text-zinc-900 font-sans">
+      {/* Top Header with TyHire Logo */}
+      <header className="flex items-center justify-between px-6 py-3.5 bg-white border-b border-zinc-200 shrink-0 sticky top-0 z-20 shadow-xs">
+        <div className="flex items-center gap-4">
+          <Image src="/logo.png" alt="TyHire" width={120} height={40} priority className="h-7 w-auto" />
+          <div className="h-5 w-px bg-zinc-200" />
           <div>
-            <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-2">
-              TyHire Interviewer Cockpit
-              <span className="text-[10px] uppercase px-2 py-0.5 rounded-full bg-blue-900/60 text-blue-300 font-mono">
+            <h1 className="text-sm font-bold tracking-tight text-zinc-900 flex items-center gap-2">
+              Interviewer Command Center
+              <span className="text-[10px] uppercase px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-mono font-semibold">
                 GPT Telemetry & Gaze AI
               </span>
             </h1>
-            <p className="text-xs text-zinc-400">
-              Candidate: <strong className="text-zinc-200">{session.candidate_name}</strong>
+            <p className="text-xs text-zinc-500">
+              Candidate: <strong className="text-zinc-800 font-semibold">{session.candidate_name}</strong>
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
           {joined && !callEnded && isTeleprompterReading && (
-            <div className="flex items-center gap-2 px-3 py-1 bg-purple-950/90 border border-purple-700 rounded-full text-xs animate-pulse">
-              <span className="w-2.5 h-2.5 rounded-full bg-purple-400 shadow-[0_0_8px_#c084fc]" />
-              <span className="text-purple-200 font-bold">⚠️ Teleprompter Script Reading Detected</span>
+            <div className="flex items-center gap-2 px-3 py-1 bg-purple-50 border border-purple-300 rounded-full text-xs animate-pulse">
+              <span className="w-2.5 h-2.5 rounded-full bg-purple-600 shadow-[0_0_8px_#9333ea]" />
+              <span className="text-purple-700 font-bold">⚠️ Teleprompter Script Reading Detected</span>
             </div>
           )}
 
           {joined && !callEnded && (
-            <div className="flex items-center gap-2 px-3 py-1 bg-zinc-800 border border-zinc-700 rounded-full text-xs">
-              <span className={`w-2 h-2 rounded-full ${isCandidateGazeFocused ? "bg-emerald-400" : "bg-red-400 animate-ping"}`} />
-              <span className={isCandidateGazeFocused ? "text-emerald-300 text-xs font-semibold" : "text-red-300 text-xs font-bold"}>
+            <div className="flex items-center gap-2 px-3 py-1 bg-white border border-zinc-200 rounded-full text-xs shadow-xs">
+              <span className={`w-2 h-2 rounded-full ${isCandidateGazeFocused ? "bg-emerald-500" : "bg-red-500 animate-ping"}`} />
+              <span className={isCandidateGazeFocused ? "text-emerald-700 text-xs font-semibold" : "text-red-600 text-xs font-bold"}>
                 {isCandidateGazeFocused ? "🟢 Gaze: Focused On Camera" : "🔴 Gaze: Looking Away"}
               </span>
             </div>
@@ -418,8 +453,8 @@ export default function InterviewerCapturePage() {
 
           {joined && !callEnded && (
             <button
-              onClick={endCall}
-              className="px-4 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-lg transition-all"
+              onClick={() => endCall()}
+              className="px-4 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-sm transition-all"
             >
               End Interview
             </button>
@@ -428,7 +463,7 @@ export default function InterviewerCapturePage() {
           {callEnded && (
             <button
               onClick={() => setShowScorecard(true)}
-              className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md"
+              className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm"
             >
               View Consolidated Scorecard
             </button>
@@ -439,13 +474,13 @@ export default function InterviewerCapturePage() {
       {/* Pre-Join Screen */}
       {!joined ? (
         <div className="flex flex-1 items-center justify-center p-8">
-          <div className="max-w-lg w-full bg-zinc-900 border border-zinc-800 rounded-2xl p-8 text-center shadow-2xl space-y-6">
-            <div className="w-16 h-16 bg-blue-500/10 border border-blue-500/30 rounded-2xl flex items-center justify-center mx-auto text-3xl">
+          <div className="max-w-lg w-full bg-white border border-zinc-200 rounded-2xl p-8 text-center shadow-lg space-y-6">
+            <div className="w-16 h-16 bg-blue-50 border border-blue-200 rounded-2xl flex items-center justify-center mx-auto text-3xl">
               🎯
             </div>
             <div>
-              <h2 className="text-xl font-bold text-white mb-2">Ready to Conduct Interview</h2>
-              <p className="text-sm text-zinc-400 leading-relaxed">
+              <h2 className="text-xl font-bold text-zinc-900 mb-2">Ready to Conduct Interview</h2>
+              <p className="text-sm text-zinc-500 leading-relaxed">
                 Conduct the interview for <strong>{session.candidate_name}</strong> with real-time GPT question guidance, live answer accuracy analysis, teleprompter eye gaze detection, and live transcription.
               </p>
             </div>
@@ -457,7 +492,7 @@ export default function InterviewerCapturePage() {
                 setJoined(true);
                 startRecording();
               }}
-              className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl hover:shadow-blue-500/25 transition-all transform active:scale-98"
+              className="w-full py-3.5 px-6 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all transform active:scale-98"
             >
               Join Meet & Start AI Telemetry
             </button>
@@ -466,62 +501,70 @@ export default function InterviewerCapturePage() {
       ) : (
         /* Main Command Center Layout */
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 max-w-[1600px] w-full mx-auto">
-          {/* Left Column: HD Video & Active Question / Then-and-There Decision */}
+          {/* Left Column: Two-Part Video/Screenshare & Active Question / Then-and-There Decision */}
           <div className="lg:col-span-7 flex flex-col gap-3">
-            <div className="relative w-full h-[420px] bg-black rounded-xl overflow-hidden border border-zinc-800 shadow-2xl">
-              <WebRTCRoom
-                sessionId={session.id}
-                token={session.interviewer_join_token ?? ""}
-                role="interviewer"
-                iceServers={session.ice_servers}
-                enableEyeTracking={true}
-                onGazeChange={(focused, isTeleprompter) => {
-                  setIsCandidateGazeFocused(focused);
-                  if (isTeleprompter !== undefined) setIsTeleprompterReading(isTeleprompter);
-                }}
-                onApiReady={(api) => {
-                  webrtcApiRef.current = api;
-                }}
-                livekitToken={session.livekit_token}
-                livekitUrl={session.livekit_url}
-              />
+            <div className="relative w-full h-[400px] bg-white rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
+              {!callEnded ? (
+                <WebRTCRoom
+                  sessionId={session.id}
+                  token={session.interviewer_join_token ?? ""}
+                  role="interviewer"
+                  iceServers={session.ice_servers}
+                  enableEyeTracking={true}
+                  onGazeChange={(focused, isTeleprompter) => {
+                    setIsCandidateGazeFocused(focused);
+                    if (isTeleprompter !== undefined) setIsTeleprompterReading(isTeleprompter);
+                  }}
+                  onApiReady={(api) => {
+                    webrtcApiRef.current = api;
+                  }}
+                  onPeerEnded={() => endCall(false)}
+                  livekitToken={session.livekit_token}
+                  livekitUrl={session.livekit_url}
+                />
+              ) : (
+                <div className="flex items-center justify-center w-full h-full bg-zinc-100 text-zinc-500 text-sm font-medium rounded-lg">
+                  Call ended — recording finalized.
+                </div>
+              )}
             </div>
 
             {/* Active Question & "Then and There" Instant Decision Bar */}
             {activeQuestion && (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3.5 space-y-2.5">
+              <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-950 border border-blue-800 text-blue-300">
-                    Active Question · {activeQuestion.category}
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700">
+                    Active Question · {activeQuestion.category} · {activeQuestion.difficulty}
                   </span>
                   <div className="flex items-center gap-2">
-                    {evaluatingAnswer && (
-                      <span className="text-[11px] text-blue-400 animate-pulse font-medium flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping"></span>
-                        GPT Evaluating Answer…
-                      </span>
-                    )}
+                    <button
+                      onClick={() => runAnswerEvaluation()}
+                      disabled={evaluatingAnswer}
+                      className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 text-[11px] font-bold transition-all flex items-center gap-1 shadow-2xs"
+                    >
+                      {evaluatingAnswer ? "Evaluating…" : "⚡ Evaluate Answer"}
+                    </button>
                     {activeEvaluation && (
-                      <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300">
+                      <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 shadow-2xs">
                         Accuracy: {activeEvaluation.accuracy_score.toFixed(0)}/100
                       </span>
                     )}
                   </div>
                 </div>
 
-                <p className="text-xs font-semibold text-white leading-relaxed">{activeQuestion.question}</p>
+                <p className="text-xs font-bold text-zinc-900 leading-relaxed">{activeQuestion.question}</p>
 
                 {/* Concept Checklist */}
-                <div className="flex flex-wrap gap-1.5 pt-1">
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
                   {activeQuestion.expected_concepts.map((concept, idx) => {
                     const isCovered = activeEvaluation?.concepts_covered.includes(concept);
                     return (
                       <span
                         key={idx}
-                        className={`text-[10px] font-medium px-2 py-0.5 rounded-full border transition-all ${
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border transition-all ${
                           isCovered
-                            ? "bg-emerald-950/80 border-emerald-700 text-emerald-300"
-                            : "bg-zinc-950 border-zinc-800 text-zinc-400"
+                            ? "bg-emerald-50 border-emerald-300 text-emerald-700 shadow-2xs"
+                            : "bg-zinc-50 border-zinc-200 text-zinc-500"
                         }`}
                       >
                         {isCovered ? "✓" : "○"} {concept}
@@ -532,31 +575,31 @@ export default function InterviewerCapturePage() {
 
                 {/* Adaptive Follow-up Prompt */}
                 {activeEvaluation?.suggested_followup && (
-                  <div className="p-2 rounded-lg bg-indigo-950/40 border border-indigo-800/50 text-[11px] text-indigo-200">
-                    <strong className="text-indigo-300">💡 Suggested Follow-up: </strong>
+                  <div className="p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-[11px] text-indigo-900">
+                    <strong className="text-indigo-700 font-bold">💡 Suggested Follow-up: </strong>
                     {activeEvaluation.suggested_followup}
                   </div>
                 )}
 
                 {/* "Then and There" 1-Click Evaluation Buttons */}
-                <div className="flex items-center justify-between pt-1 border-t border-zinc-800/80">
-                  <span className="text-[11px] font-bold text-zinc-400">Rate Answer Then & There:</span>
-                  <div className="flex gap-1.5">
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-100">
+                  <span className="text-[11px] font-bold text-zinc-600">Rate Answer Then & There:</span>
+                  <div className="flex gap-2">
                     <button
                       onClick={() => handleRateQuestion("strong_pass")}
-                      className="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-bold transition-all"
+                      className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold shadow-2xs transition-all"
                     >
                       🟢 Strong Pass
                     </button>
                     <button
                       onClick={() => handleRateQuestion("needs_followup")}
-                      className="px-2.5 py-1 rounded bg-amber-700 hover:bg-amber-600 text-white text-[11px] font-bold transition-all"
+                      className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold shadow-2xs transition-all"
                     >
                       🟡 Needs Follow-up
                     </button>
                     <button
                       onClick={() => handleRateQuestion("inaccurate_scripted")}
-                      className="px-2.5 py-1 rounded bg-red-700 hover:bg-red-600 text-white text-[11px] font-bold transition-all"
+                      className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold shadow-2xs transition-all"
                     >
                       🔴 Inaccurate / Scripted
                     </button>
@@ -566,12 +609,12 @@ export default function InterviewerCapturePage() {
             )}
 
             {/* In-Call Action Toolbar */}
-            <div className="flex flex-wrap items-center justify-between bg-zinc-900/80 backdrop-blur-sm border border-zinc-800 rounded-xl p-2.5 gap-2">
+            <div className="flex flex-wrap items-center justify-between bg-white border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                    micMuted ? "bg-red-950 border-red-800 text-red-300" : "bg-zinc-800 border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+                    micMuted ? "bg-red-50 border-red-200 text-red-700" : "bg-zinc-50 border-zinc-200 text-zinc-700 hover:bg-zinc-100"
                   }`}
                 >
                   {micMuted ? "🔇 Unmute Mic" : "🎙️ Mute Mic"}
@@ -579,14 +622,14 @@ export default function InterviewerCapturePage() {
                 <button
                   onClick={toggleCamera}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                    cameraOff ? "bg-red-950 border-red-800 text-red-300" : "bg-zinc-800 border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+                    cameraOff ? "bg-red-50 border-red-200 text-red-700" : "bg-zinc-50 border-zinc-200 text-zinc-700 hover:bg-zinc-100"
                   }`}
                 >
                   {cameraOff ? "Turn Camera On" : "Turn Camera Off"}
                 </button>
                 <button
                   onClick={requestMute}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-zinc-200 transition-all"
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-50 border border-zinc-200 hover:bg-zinc-100 text-zinc-700 transition-all"
                 >
                   {muteRequestSent ? "✓ Request Sent" : "Ask Candidate to Mute"}
                 </button>
@@ -594,38 +637,38 @@ export default function InterviewerCapturePage() {
 
               <div className="flex items-center gap-2">
                 {recording ? (
-                  <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-purple-950/80 border border-purple-800 text-purple-300 text-xs font-medium">
-                    <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                  <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-purple-50 border border-purple-200 text-purple-700 text-xs font-medium">
+                    <span className="w-2 h-2 rounded-full bg-purple-600 animate-pulse" />
                     Recording Live
                   </span>
                 ) : (
                   <button
                     onClick={startRecording}
-                    className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold"
+                    className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold shadow-2xs"
                   >
                     Start Audio Record
                   </button>
                 )}
                 <button
-                  onClick={endCall}
-                  className="px-3.5 py-1.5 rounded-lg bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold"
+                  onClick={() => endCall()}
+                  className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-2xs"
                 >
                   End Call
                 </button>
               </div>
             </div>
 
-            {micError && <p className="text-xs text-red-400 bg-red-950/50 p-2 rounded border border-red-800">{micError}</p>}
+            {micError && <p className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">{micError}</p>}
           </div>
 
           {/* Right Column: AI Intelligence & Live Telemetry Tabs */}
           <div className="lg:col-span-5 flex flex-col gap-3">
             {/* Tab Navigation */}
-            <div className="flex bg-zinc-900 border border-zinc-800 rounded-xl p-1 gap-1">
+            <div className="flex bg-zinc-100 border border-zinc-200 rounded-xl p-1 gap-1">
               <button
                 onClick={() => setActiveTab("questions")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "questions" ? "bg-blue-600 text-white shadow" : "text-zinc-400 hover:text-white"
+                  activeTab === "questions" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🤖 AI Questions ({suggestedQuestions.length})
@@ -633,7 +676,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("transcript")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "transcript" ? "bg-blue-600 text-white shadow" : "text-zinc-400 hover:text-white"
+                  activeTab === "transcript" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🎙️ Live Transcript
@@ -641,7 +684,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("sentiment")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "sentiment" ? "bg-blue-600 text-white shadow" : "text-zinc-400 hover:text-white"
+                  activeTab === "sentiment" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🧠 Sentiment
@@ -649,7 +692,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("proctoring")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "proctoring" ? "bg-blue-600 text-white shadow" : "text-zinc-400 hover:text-white"
+                  activeTab === "proctoring" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🛡️ Signals ({liveSignals.length})
@@ -657,7 +700,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("evaluation")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "evaluation" ? "bg-blue-600 text-white shadow" : "text-zinc-400 hover:text-white"
+                  activeTab === "evaluation" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 📝 Notes
@@ -668,10 +711,10 @@ export default function InterviewerCapturePage() {
             <div className="flex-1">
               {/* Tab 0: AI-Suggested Questions Bank */}
               {activeTab === "questions" && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3.5 space-y-3 h-[450px] overflow-y-auto">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">GPT-Suggested Question Bank</h3>
-                    <span className="text-[10px] text-zinc-400 font-mono">Tailored to Resume & JD</span>
+                <div className="bg-white border border-zinc-200 rounded-xl p-3.5 space-y-3 h-[450px] overflow-y-auto shadow-xs">
+                  <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">GPT-Suggested Question Bank</h3>
+                    <span className="text-[10px] text-zinc-500 font-mono">Tailored to Resume & JD</span>
                   </div>
 
                   <div className="space-y-2">
@@ -681,34 +724,34 @@ export default function InterviewerCapturePage() {
                       return (
                         <div
                           key={q.id}
-                          className={`p-3 rounded-lg border text-xs transition-all ${
+                          className={`p-3 rounded-xl border text-xs transition-all ${
                             isSelected
-                              ? "bg-blue-950/40 border-blue-600 ring-1 ring-blue-500"
-                              : "bg-zinc-950 border-zinc-800 hover:border-zinc-700"
+                              ? "bg-blue-50/70 border-blue-500 ring-1 ring-blue-500/50 shadow-xs"
+                              : "bg-white border-zinc-200 hover:border-zinc-300"
                           }`}
                         >
                           <div className="flex items-center justify-between mb-1.5">
-                            <span className="font-semibold text-[10px] uppercase px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                            <span className="font-semibold text-[10px] uppercase px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-700">
                               {q.category} · {q.difficulty}
                             </span>
                             {hasRating && (
                               <span
-                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                                   hasRating.rating === "strong_pass"
-                                    ? "bg-emerald-900/60 text-emerald-300"
+                                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                                     : hasRating.rating === "needs_followup"
-                                    ? "bg-amber-900/60 text-amber-300"
-                                    : "bg-red-900/60 text-red-300"
+                                    ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                    : "bg-red-50 text-red-700 border border-red-200"
                                 }`}
                               >
                                 ✓ {hasRating.rating.replace("_", " ")}
                               </span>
                             )}
                           </div>
-                          <p className="font-medium text-white mb-2">{q.question}</p>
-                          <p className="text-[11px] text-zinc-400 mb-2 italic">Context: {q.context_reason}</p>
+                          <p className="font-bold text-zinc-900 mb-1.5">{q.question}</p>
+                          <p className="text-[11px] text-zinc-500 mb-2 italic">Context: {q.context_reason}</p>
 
-                          <div className="flex items-center justify-between pt-1">
+                          <div className="flex items-center justify-between pt-1 border-t border-zinc-100">
                             <span className="text-[10px] text-zinc-500">
                               Key concepts: {q.expected_concepts.join(", ")}
                             </span>
@@ -717,8 +760,10 @@ export default function InterviewerCapturePage() {
                                 setActiveQuestion(q);
                                 setActiveEvaluation(null);
                               }}
-                              className={`px-3 py-1 rounded text-[11px] font-bold ${
-                                isSelected ? "bg-blue-600 text-white" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                              className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                                isSelected
+                                  ? "bg-blue-600 text-white shadow-xs"
+                                  : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
                               }`}
                             >
                               {isSelected ? "Active Question" : "Ask Question"}
@@ -733,79 +778,100 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 1: Live Transcription Stream */}
               {activeTab === "transcript" && (
-                <LiveTranscriptFeed
-                  items={allTranscripts}
-                  interviewerInterim={interviewerInterim}
-                  className="h-[450px]"
-                />
+                <div className="space-y-2">
+                  <LiveTranscriptFeed
+                    items={allTranscripts}
+                    interviewerInterim={interviewerInterim}
+                    className="h-[390px]"
+                  />
+                  {/* Quick Speech / Utterance Entry Bar */}
+                  <div className="flex gap-1.5 bg-white border border-zinc-200 rounded-xl p-1.5 shadow-xs">
+                    <input
+                      type="text"
+                      placeholder="Type test candidate or interviewer utterance..."
+                      value={manualUtterance}
+                      onChange={(e) => setManualUtterance(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSendManualUtterance("candidate");
+                      }}
+                      className="flex-1 bg-zinc-50 border border-zinc-200 rounded-lg px-2.5 py-1 text-xs text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      onClick={() => handleSendManualUtterance("candidate")}
+                      className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg shadow-2xs"
+                    >
+                      Post Candidate
+                    </button>
+                  </div>
+                </div>
               )}
 
               {/* Tab 2: Live Sentiment & Emotional Affect */}
               {activeTab === "sentiment" && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-4 h-[450px] overflow-y-auto">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">Live Emotional & Voice Telemetry</h3>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-semibold">
+                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3.5 h-[450px] overflow-y-auto shadow-xs">
+                  <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Emotional & Voice Telemetry</h3>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">
                       Real-time AI
                     </span>
                   </div>
 
                   {/* Tension Level Meter */}
-                  <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2">
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2">
                     <div className="flex justify-between text-xs">
-                      <span className="text-zinc-400">Candidate Emotional Tension:</span>
+                      <span className="text-zinc-600 font-medium">Candidate Emotional Tension:</span>
                       <span
                         className={`font-bold capitalize ${
                           latestSentiment?.facial_affect?.tension_level === "high"
-                            ? "text-red-400"
+                            ? "text-red-600"
                             : latestSentiment?.facial_affect?.tension_level === "medium"
-                            ? "text-amber-400"
-                            : "text-emerald-400"
+                            ? "text-amber-600"
+                            : "text-emerald-600"
                         }`}
                       >
-                        {latestSentiment?.facial_affect?.tension_level ?? "Low (Calm)"}
+                        {latestSentiment?.facial_affect?.tension_level ?? "Low (Calm & Composed)"}
                       </span>
                     </div>
-                    <div className="w-full bg-zinc-800 rounded-full h-2.5 overflow-hidden flex">
+                    <div className="w-full bg-zinc-200 rounded-full h-2.5 overflow-hidden flex">
                       <div className="bg-emerald-500 h-full w-1/3" />
-                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "medium" || latestSentiment?.facial_affect?.tension_level === "high" ? "bg-amber-500" : "bg-zinc-700"}`} />
-                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "high" ? "bg-red-500 animate-pulse" : "bg-zinc-700"}`} />
+                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "medium" || latestSentiment?.facial_affect?.tension_level === "high" ? "bg-amber-500" : "bg-zinc-300"}`} />
+                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "high" ? "bg-red-500 animate-pulse" : "bg-zinc-300"}`} />
                     </div>
                   </div>
 
                   {/* Facial Affect */}
-                  <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-1">
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
                     <span className="text-[11px] uppercase font-bold text-zinc-500">Observable Facial Affect</span>
-                    <p className="text-sm font-semibold capitalize text-white">
+                    <p className="text-sm font-bold capitalize text-zinc-900">
                       {latestSentiment?.facial_affect?.overall_affect ?? "Focused & Attentive"}
                     </p>
                     {latestSentiment?.facial_affect?.notes && (
-                      <p className="text-xs text-zinc-400 mt-1">{latestSentiment.facial_affect.notes}</p>
+                      <p className="text-xs text-zinc-500 mt-1">{latestSentiment.facial_affect.notes}</p>
                     )}
                   </div>
 
                   {/* Voice Tone */}
-                  <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-1">
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
                     <span className="text-[11px] uppercase font-bold text-zinc-500">Voice Tone & Pitch</span>
-                    <p className="text-sm font-semibold capitalize text-white">
-                      {latestSentiment?.voice_tone?.overall_tone ?? "Natural Conversation Tone"}
+                    <p className="text-sm font-bold capitalize text-zinc-900">
+                      {latestSentiment?.voice_tone?.overall_tone ?? "Natural Conversational Flow"}
                     </p>
                     {latestSentiment?.voice_tone?.notes && (
-                      <p className="text-xs text-zinc-400 mt-1">{latestSentiment.voice_tone.notes}</p>
+                      <p className="text-xs text-zinc-500 mt-1">{latestSentiment.voice_tone.notes}</p>
                     )}
                   </div>
 
                   {/* Eye Tracking Telemetry State */}
-                  <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-1">
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
                     <span className="text-[11px] uppercase font-bold text-zinc-500">Candidate Eye & Gaze Motion</span>
                     <div className="flex items-center gap-2 mt-1">
-                      <span className={`w-3 h-3 rounded-full ${isTeleprompterReading ? "bg-purple-400" : isCandidateGazeFocused ? "bg-emerald-500" : "bg-red-500"}`} />
-                      <span className="text-xs font-semibold text-white">
+                      <span className={`w-3 h-3 rounded-full ${isTeleprompterReading ? "bg-purple-600" : isCandidateGazeFocused ? "bg-emerald-500" : "bg-red-500"}`} />
+                      <span className="text-xs font-semibold text-zinc-800">
                         {isTeleprompterReading
                           ? "⚠️ Teleprompter Script Reading Detected (Horizontal scanning)"
                           : isCandidateGazeFocused
-                          ? "Candidate looking at screen/camera (Green Box)"
-                          : "Candidate gaze turned away from camera (Red Box)"}
+                          ? "🟢 Candidate looking at camera / screen (Focused)"
+                          : "🔴 Candidate gaze turned away from camera (Looking Away)"}
                       </span>
                     </div>
                   </div>
@@ -814,23 +880,23 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 3: Live Proctoring & Integrity */}
               {activeTab === "proctoring" && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3 h-[450px] flex flex-col">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">Live Proctoring Signal Feed</h3>
-                    <span className="text-[10px] text-zinc-400 font-mono">{liveSignals.length} events logged</span>
+                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3 h-[450px] flex flex-col shadow-xs">
+                  <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Proctoring Signal Feed</h3>
+                    <span className="text-[10px] text-zinc-500 font-mono">{liveSignals.length} events logged</span>
                   </div>
 
                   <div className="flex-1 overflow-y-auto space-y-2 pr-1">
                     {liveSignals.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-500">
-                        <p className="text-xs">✨ Clean session so far.</p>
-                        <p className="text-[11px] text-zinc-600 mt-1">No proctoring anomalies or suspicious activities detected.</p>
+                      <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400">
+                        <p className="text-xs font-medium">✨ Clean session so far.</p>
+                        <p className="text-[11px] text-zinc-400 mt-1">No proctoring anomalies or suspicious activities detected.</p>
                       </div>
                     ) : (
                       liveSignals.slice().reverse().map((s, i) => (
-                        <div key={i} className="flex items-start justify-between bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-xs">
+                        <div key={i} className="flex items-start justify-between bg-zinc-50 border border-zinc-200 rounded-xl p-2.5 text-xs">
                           <div>
-                            <span className="font-semibold text-zinc-200">{SIGNAL_LABELS[s.signal_type] || s.signal_type}</span>
+                            <span className="font-bold text-zinc-800">{SIGNAL_LABELS[s.signal_type] || s.signal_type}</span>
                           </div>
                           <span className="text-[10px] text-zinc-500 font-mono">{formatOffset(s.session_offset_ms)}</span>
                         </div>
@@ -842,10 +908,10 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 4: Evaluation & Live Read */}
               {activeTab === "evaluation" && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-4 h-[450px] flex flex-col justify-between">
+                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-4 h-[450px] flex flex-col justify-between shadow-xs">
                   <div className="space-y-3">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">Live Interviewer Decision</h3>
-                    <p className="text-xs text-zinc-400">Record your evaluation in real time during the call:</p>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Interviewer Decision</h3>
+                    <p className="text-xs text-zinc-500">Record your evaluation in real time during the call:</p>
 
                     <div className="grid grid-cols-3 gap-2">
                       {DECISION_OPTIONS.map((opt) => (
@@ -854,8 +920,8 @@ export default function InterviewerCapturePage() {
                           type="button"
                           onClick={() => submitDecision(opt.value)}
                           disabled={savingDecision}
-                          className={`py-2.5 px-2 text-xs font-bold rounded-lg transition-all ${opt.className} ${
-                            decision === opt.value ? "ring-2 ring-white scale-102" : "opacity-75 hover:opacity-100"
+                          className={`py-2.5 px-2 text-xs font-bold rounded-xl transition-all ${opt.className} ${
+                            decision === opt.value ? "ring-2 ring-blue-600 scale-102" : "opacity-85 hover:opacity-100"
                           }`}
                         >
                           {decision === opt.value ? `✓ ${opt.label}` : opt.label}
@@ -864,14 +930,14 @@ export default function InterviewerCapturePage() {
                     </div>
 
                     <div className="space-y-1.5 pt-2">
-                      <label className="text-xs font-bold text-zinc-400">Interviewer Notes & Impressions:</label>
+                      <label className="text-xs font-bold text-zinc-700">Interviewer Notes & Impressions:</label>
                       <textarea
                         rows={6}
                         value={decisionNotes}
                         onChange={(e) => setDecisionNotes(e.target.value)}
                         onBlur={() => decision && submitDecision(decision)}
                         placeholder="Type candidate strengths, answers to core technical questions, red flags, or notes..."
-                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500"
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-xl p-3 text-xs text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-blue-500"
                       />
                     </div>
                   </div>
@@ -879,9 +945,9 @@ export default function InterviewerCapturePage() {
                   <button
                     onClick={() => decision && submitDecision(decision)}
                     disabled={savingDecision}
-                    className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-bold"
+                    className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all"
                   >
-                    {savingDecision ? "Saving..." : "Save Evaluation Notes"}
+                    {savingDecision ? "Saving…" : "Save Evaluation Notes"}
                   </button>
                 </div>
               )}
@@ -892,18 +958,18 @@ export default function InterviewerCapturePage() {
 
       {/* Post-Meeting Consolidated Scorecard Modal */}
       {showScorecard && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-6 my-8">
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white border border-zinc-200 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-6 my-8">
+            <div className="flex items-center justify-between border-b border-zinc-200 pb-3">
               <div>
-                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <h2 className="text-lg font-bold text-zinc-900 flex items-center gap-2">
                   📊 Consolidated Evaluation Scorecard
                 </h2>
-                <p className="text-xs text-zinc-400">Candidate: {session.candidate_name}</p>
+                <p className="text-xs text-zinc-500">Candidate: {session.candidate_name}</p>
               </div>
               <button
                 onClick={() => setShowScorecard(false)}
-                className="text-zinc-400 hover:text-white text-lg font-bold p-1"
+                className="text-zinc-400 hover:text-zinc-700 text-lg font-bold p-1"
               >
                 ✕
               </button>
@@ -911,21 +977,21 @@ export default function InterviewerCapturePage() {
 
             {/* Scorecard Summary Metrics */}
             <div className="grid grid-cols-3 gap-3 text-center">
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
-                <span className="text-[11px] font-bold text-zinc-400 uppercase">AI Fit Score</span>
-                <p className="text-xl font-extrabold text-blue-400 mt-0.5">
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3">
+                <span className="text-[11px] font-bold text-zinc-500 uppercase">AI Fit Score</span>
+                <p className="text-xl font-extrabold text-blue-600 mt-0.5">
                   {consolidatedReport?.fit_score != null ? `${Number(consolidatedReport.fit_score).toFixed(0)}/100` : "85/100"}
                 </p>
               </div>
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
-                <span className="text-[11px] font-bold text-zinc-400 uppercase">Proctoring Rating</span>
-                <p className="text-xl font-extrabold text-emerald-400 mt-0.5">
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3">
+                <span className="text-[11px] font-bold text-zinc-500 uppercase">Proctoring Rating</span>
+                <p className="text-xl font-extrabold text-emerald-600 mt-0.5">
                   {consolidatedReport?.integrity_score != null ? `${Number(consolidatedReport.integrity_score).toFixed(0)}/100` : "Clean (100)"}
                 </p>
               </div>
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
-                <span className="text-[11px] font-bold text-zinc-400 uppercase">Interviewer Read</span>
-                <p className="text-xl font-extrabold text-purple-400 capitalize mt-0.5">
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3">
+                <span className="text-[11px] font-bold text-zinc-500 uppercase">Interviewer Read</span>
+                <p className="text-xl font-extrabold text-purple-600 capitalize mt-0.5">
                   {decision || "Proceed"}
                 </p>
               </div>
@@ -933,20 +999,20 @@ export default function InterviewerCapturePage() {
 
             {/* Question Accuracy Scorecard */}
             {ratedQuestions.length > 0 && (
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 space-y-2.5">
-                <h4 className="text-xs font-bold text-zinc-300 uppercase">AI-Evaluated Question Scorecard</h4>
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 space-y-2.5">
+                <h4 className="text-xs font-bold text-zinc-700 uppercase">AI-Evaluated Question Scorecard</h4>
                 <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                   {ratedQuestions.map((rq, idx) => (
-                    <div key={idx} className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs flex items-start justify-between gap-3">
+                    <div key={idx} className="p-2.5 rounded-lg bg-white border border-zinc-200 text-xs flex items-start justify-between gap-3 shadow-2xs">
                       <div className="space-y-0.5">
-                        <p className="font-semibold text-white">{rq.question_text}</p>
+                        <p className="font-bold text-zinc-900">{rq.question_text}</p>
                         {rq.concepts_covered?.length > 0 && (
-                          <p className="text-[11px] text-emerald-400">Covered: {rq.concepts_covered.join(", ")}</p>
+                          <p className="text-[11px] text-emerald-700 font-medium">Covered: {rq.concepts_covered.join(", ")}</p>
                         )}
                       </div>
                       <div className="text-right shrink-0">
-                        <span className="font-bold text-blue-400">{rq.accuracy_score?.toFixed(0) ?? 85}/100</span>
-                        <span className="block text-[10px] text-zinc-400 capitalize">{rq.rating.replace("_", " ")}</span>
+                        <span className="font-bold text-blue-600">{rq.accuracy_score?.toFixed(0) ?? 85}/100</span>
+                        <span className="block text-[10px] text-zinc-500 capitalize">{rq.rating.replace("_", " ")}</span>
                       </div>
                     </div>
                   ))}
@@ -956,54 +1022,68 @@ export default function InterviewerCapturePage() {
 
             {/* Interviewer Notes Review */}
             {decisionNotes && (
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3.5 space-y-1">
-                <span className="text-[11px] font-bold text-zinc-400 uppercase">Interviewer Notes</span>
-                <p className="text-xs text-zinc-200 whitespace-pre-wrap">{decisionNotes}</p>
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3.5 space-y-1">
+                <span className="text-[11px] font-bold text-zinc-500 uppercase">Interviewer Notes</span>
+                <p className="text-xs text-zinc-800 whitespace-pre-wrap">{decisionNotes}</p>
               </div>
             )}
 
             {/* Actions: Send to Interviewer Email & Download PDF */}
-            <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 space-y-3">
-              <h4 className="text-xs font-bold text-zinc-300 uppercase">Send Consolidated Report to Interviewer</h4>
+            <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 space-y-3">
+              <h4 className="text-xs font-bold text-zinc-700 uppercase">Send Consolidated Report to Interviewer</h4>
               <div className="flex gap-2">
                 <input
                   type="email"
                   placeholder="Enter interviewer email address (e.g. interviewer@company.com)"
                   value={emailRecipient}
                   onChange={(e) => setEmailRecipient(e.target.value)}
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-500"
+                  className="flex-1 bg-white border border-zinc-200 rounded-lg px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-blue-500"
                 />
                 <button
                   onClick={handleSendEmailReport}
                   disabled={sendingEmail || emailSent}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 text-white font-bold text-xs rounded-lg shadow transition-all"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 disabled:text-zinc-400 text-white font-bold text-xs rounded-lg shadow-xs transition-all"
                 >
-                  {sendingEmail ? "Sending..." : emailSent ? "✓ Email Dispatched" : "📧 Send Scorecard"}
+                  {sendingEmail ? "Sending…" : emailSent ? "✓ Email Dispatched" : "📧 Send Scorecard"}
                 </button>
               </div>
               {emailSent && (
-                <p className="text-xs text-emerald-400 font-semibold">
+                <p className="text-xs text-emerald-700 font-semibold">
                   ✓ Consolidated evaluation report and PDF summary dispatched to interviewer!
                 </p>
               )}
             </div>
 
             {/* Action Bar */}
-            <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center justify-between pt-2 gap-2">
               <a
                 href={`${BASE_URL}/interviews/${session.id}/consolidated-report/pdf`}
                 target="_blank"
                 rel="noreferrer"
-                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white font-semibold text-xs rounded-lg border border-zinc-700 flex items-center gap-1.5"
+                className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-xs rounded-lg border border-zinc-200 flex items-center gap-1.5 shadow-2xs"
               >
                 📄 Download PDF Evaluation Report
               </a>
-              <button
-                onClick={() => setShowScorecard(false)}
-                className="px-5 py-2 bg-zinc-700 hover:bg-zinc-600 text-white font-bold text-xs rounded-lg"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowScorecard(false)}
+                  className="px-5 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-bold text-xs rounded-lg shadow-2xs"
+                >
+                  Close
+                </button>
+                {closeFailed ? (
+                  <p className="text-xs text-zinc-500 max-w-[220px] text-right">
+                    Can&apos;t close this automatically — go ahead and close the tab yourself.
+                  </p>
+                ) : (
+                  <button
+                    onClick={handleCloseTab}
+                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg shadow-xs"
+                  >
+                    Finish & Close Tab
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

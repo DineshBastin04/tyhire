@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import { BASE_URL } from "@/lib/api";
 import type { IceServer } from "@/lib/types";
 import { LiveKitRoom, RoomAudioRenderer, useTracks, VideoTrack } from "@livekit/components-react";
-import { Track, Room } from "livekit-client";
+import { Track, Room, RoomEvent } from "livekit-client";
 import EyeTrackingOverlay from "@/components/EyeTrackingOverlay";
 
 export interface WebRTCApi {
@@ -16,6 +16,11 @@ export interface WebRTCApi {
    * it — a raw 2-party connection has no server in the media path that could enforce a
    * mute the way Jitsi's moderator role did — so this is a polite request, not a command. */
   requestPeerMute: () => void;
+  /** Tells the other participant's page the call is over from this end — sent explicitly
+   * because stopping local media here doesn't by itself close the peer's connection or
+   * signaling socket, so without this the other side would just sit on a frozen call with
+   * no idea it's over. See onPeerEnded for the receiving side. */
+  notifyPeerEnded: () => void;
 }
 
 /**
@@ -34,6 +39,12 @@ interface WebRTCRoomProps {
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  /** Fired when the other participant ends the call — either explicitly (they clicked
+   * their own end/finish button) or because their connection dropped (tab closed, crashed,
+   * network gone). Callers should react the same way they'd react to their own local
+   * end/finish action, so both sides always finalize their recording and wrap up together
+   * rather than one side being left on a dead call. */
+  onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   livekitToken?: string | null;
   livekitUrl?: string | null;
@@ -64,6 +75,7 @@ export default function WebRTCRoom({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onPeerEnded,
   onPeerConnectedChange,
   livekitToken,
   livekitUrl,
@@ -80,6 +92,7 @@ export default function WebRTCRoom({
         extraVideoTrack={extraVideoTrack}
         onApiReady={onApiReady}
         onMuteRequested={onMuteRequested}
+        onPeerEnded={onPeerEnded}
         onPeerConnectedChange={onPeerConnectedChange}
       />
     );
@@ -217,6 +230,7 @@ export default function WebRTCRoom({
           return !track.enabled;
         },
         requestPeerMute: () => send({ type: "mute-request" }),
+        notifyPeerEnded: () => send({ type: "call-ended" }),
       });
 
       const wsUrl = `${wsBaseUrl()}/interviews/${sessionId}/ws/signal?token=${encodeURIComponent(
@@ -236,6 +250,16 @@ export default function WebRTCRoom({
           pendingScreenStreamRef.current = null;
           remoteCameraStreamId = null;
           setHasRemoteScreen(false);
+          // The peer's signaling socket closed — tab closed, crashed, or network gone. A
+          // real disconnect only ever fires this once (no flapping/reconnect logic on
+          // either side), so treating it as "the call is over" here is safe, and it's the
+          // only signal at all for a peer who closed their tab before explicitly ending.
+          onPeerEnded?.();
+        } else if (message.type === "call-ended") {
+          // Sent explicitly when the peer ends the call but stays on their page (e.g. to
+          // view a post-call scorecard) — their socket is still open, so "peer-left" above
+          // won't fire on its own.
+          onPeerEnded?.();
         } else if (message.type === "offer" || message.type === "answer") {
           const description = { type: message.type, sdp: message.sdp } as RTCSessionDescriptionInit;
           const offerCollision =
@@ -270,17 +294,119 @@ export default function WebRTCRoom({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, token, role]);
 
+  const [isGazeFocused, setIsGazeFocused] = useState(true);
+  const [isTeleprompter, setIsTeleprompter] = useState(false);
+
+  const handleGaze = (focused: boolean, teleprompter?: boolean) => {
+    setIsGazeFocused(focused);
+    if (teleprompter !== undefined) setIsTeleprompter(teleprompter);
+    onGazeChange?.(focused, teleprompter);
+  };
+
+  // Interviewer Dynamic Gaze Border Class
+  const gazeBorderClass = isTeleprompter
+    ? "border-purple-500 ring-4 ring-purple-500/40 shadow-[0_0_20px_rgba(168,85,247,0.5)]"
+    : isGazeFocused
+    ? "border-emerald-500 ring-2 ring-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+    : "border-red-500 ring-4 ring-red-500/40 shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse";
+
+  if (role === "interviewer") {
+    return (
+      <div className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3">
+        {/* Candidate Screenshare Viewport */}
+        <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
+          {hasRemoteScreen ? (
+            <>
+              <video
+                ref={remoteScreenRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-contain bg-zinc-950"
+              />
+              <div className="absolute top-2 left-2 px-2.5 py-1 rounded-md bg-white/90 shadow text-xs font-semibold text-zinc-800 border border-zinc-200 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+                <span>🖥️ Candidate Screenshare (Live)</span>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-col items-center justify-center p-6 text-center text-zinc-400">
+              <span className="text-3xl mb-2">🖥️</span>
+              <p className="text-xs font-medium">Candidate Screen Share</p>
+              <p className="text-[11px] text-zinc-500 mt-0.5">Waiting for candidate to start screen share…</p>
+            </div>
+          )}
+        </div>
+
+        {/* Candidate Live Camera with Gaze Border */}
+        <div
+          className={`relative w-full md:w-80 min-h-[220px] bg-zinc-900 rounded-xl overflow-hidden border-2 transition-all duration-300 ${gazeBorderClass}`}
+        >
+          {!peerPresent && (
+            <p className="absolute inset-0 flex items-center justify-center text-xs text-white/60">
+              Waiting for candidate to join…
+            </p>
+          )}
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-cover"
+          />
+          {enableEyeTracking && (
+            <EyeTrackingOverlay videoRef={remoteVideoRef} onGazeChange={handleGaze} />
+          )}
+
+          {/* Gaze Status HUD Badge on Camera */}
+          <div className="absolute top-2 left-2 px-2.5 py-1 rounded-full text-xs font-bold bg-white/95 shadow-md border border-zinc-200 flex items-center gap-1.5 z-10">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isTeleprompter
+                  ? "bg-purple-600 animate-pulse"
+                  : isGazeFocused
+                  ? "bg-emerald-500"
+                  : "bg-red-500 animate-pulse"
+              }`}
+            />
+            <span
+              className={
+                isTeleprompter
+                  ? "text-purple-700 font-bold"
+                  : isGazeFocused
+                  ? "text-emerald-700"
+                  : "text-red-600 font-bold"
+              }
+            >
+              {isTeleprompter
+                ? "⚠️ Teleprompter Reading"
+                : isGazeFocused
+                ? "🟢 Gaze: Focused"
+                : "🔴 Gaze: Looking Away"}
+            </span>
+          </div>
+
+          {/* Interviewer Self-PIP */}
+          <div className="absolute bottom-2 right-2 w-24 h-16 rounded-lg overflow-hidden border border-white/40 shadow-md bg-black">
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="relative w-full h-full min-h-[360px] rounded-md bg-black overflow-hidden">
+    <div className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
       {!peerPresent && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
-          Waiting for the other participant to join…
+          Waiting for interviewer to join…
         </p>
       )}
       <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-contain" />
-      {enableEyeTracking && role === "interviewer" && (
-        <EyeTrackingOverlay videoRef={remoteVideoRef} onGazeChange={onGazeChange} />
-      )}
       {hasRemoteScreen && (
         <video
           ref={remoteScreenRef}
@@ -289,16 +415,9 @@ export default function WebRTCRoom({
           className="absolute inset-0 w-full h-full object-contain bg-black"
         />
       )}
-      <video
-        ref={localVideoRef}
-        autoPlay
-        playsInline
-        muted
-        className="absolute bottom-2 right-2 w-28 h-20 rounded border border-white/30 object-cover"
-      />
-      {enableEyeTracking && role === "candidate" && (
-        <EyeTrackingOverlay videoRef={localVideoRef} mirrored={true} onGazeChange={onGazeChange} />
-      )}
+      <div className="absolute bottom-2 right-2 w-28 h-20 rounded-lg overflow-hidden border border-white/40 shadow bg-black">
+        <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+      </div>
     </div>
   );
 }
@@ -311,6 +430,7 @@ function LiveKitRoomRenderer({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onPeerEnded,
   onPeerConnectedChange,
 }: {
   sessionId: string;
@@ -320,6 +440,7 @@ function LiveKitRoomRenderer({
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
 }) {
   const room = useMemo(() => new Room(), []);
@@ -366,6 +487,13 @@ function LiveKitRoomRenderer({
             { reliable: true }
           ).catch((err) => console.error("failed to publish data", err));
         },
+        notifyPeerEnded: () => {
+          const encoder = new TextEncoder();
+          room.localParticipant.publishData(
+            encoder.encode(JSON.stringify({ type: "call-ended" })),
+            { reliable: true }
+          ).catch((err) => console.error("failed to publish data", err));
+        },
       });
     }
   }, [onApiReady, room]);
@@ -377,17 +505,28 @@ function LiveKitRoomRenderer({
         const msg = JSON.parse(decoder.decode(payload));
         if (msg.type === "mute-request") {
           onMuteRequested?.();
+        } else if (msg.type === "call-ended") {
+          // Peer ended but is still connected to the room (e.g. reviewing a post-call
+          // scorecard) — RoomEvent.ParticipantDisconnected below won't fire on its own yet.
+          onPeerEnded?.();
         }
       } catch (err) {
         console.error("failed to parse LiveKit data message", err);
       }
     };
 
+    // Backstop for a peer who closes their tab without explicitly ending first — LiveKit
+    // fires this once, server-detected, the same way the raw-WebRTC path's "peer-left"
+    // does, so it's safe to treat as "the call is over" here too.
+    const handleParticipantDisconnected = () => onPeerEnded?.();
+
     room.on("dataReceived", handleData);
+    room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     return () => {
       room.off("dataReceived", handleData);
+      room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     };
-  }, [onMuteRequested, room]);
+  }, [onMuteRequested, onPeerEnded, room]);
 
   return (
     <LiveKitRoom

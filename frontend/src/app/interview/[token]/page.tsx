@@ -650,7 +650,7 @@ function InterviewRecorder({
   useLiveSpeech({
     sessionId: session.id,
     speaker: "candidate",
-    enabled: recordingStarted,
+    enabled: true,
     startedAtMs: startRef.current,
     authToken: session.join_token,
     tokenHeaderKey: "X-Interview-Token",
@@ -921,8 +921,15 @@ function InterviewRecorder({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, startRef]);
 
-  async function finish() {
+  async function finish(notifyPeer = true) {
+    if (finishing) return;
     setFinishing(true);
+
+    // Tells the interviewer's page the call is over from this end — before any local
+    // teardown below, since notifyPeer only reaches them while WebRTCRoom (and its
+    // connection) is still mounted and alive. When finish() runs because *they* ended it
+    // (notifyPeer=false, via onPeerEnded), skip this — they already know.
+    if (notifyPeer) webrtcApiRef.current?.notifyPeerEnded();
 
     // Everything media-related stops here, unconditionally, before any network call — a
     // failed request below must never leave the candidate's camera/mic/screen-share
@@ -972,6 +979,7 @@ function InterviewRecorder({
             webrtcApiRef.current = api;
           }}
           onMuteRequested={() => setMuteRequested(true)}
+          onPeerEnded={() => finish(false)}
           livekitToken={session.livekit_token}
           livekitUrl={session.livekit_url}
         />
@@ -1003,7 +1011,7 @@ function InterviewRecorder({
         className="absolute w-px h-px opacity-0 pointer-events-none -z-10"
       />
       {recordingStarted ? (
-        <button onClick={finish} disabled={finishing} className="btn-primary">
+        <button onClick={() => finish()} disabled={finishing} className="btn-primary">
           {finishing ? "Submitting…" : "Finish interview"}
         </button>
       ) : (

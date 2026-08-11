@@ -3,6 +3,24 @@ import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 const WASM_PATH = "/wasm";
 const MODEL_PATH = "/models/face_landmarker.task";
 
+// MediaPipe's WASM runtime logs its own startup diagnostics (delegate selection, backend
+// info) through console.error/console.info rather than stdout — harmless, but Next.js's dev
+// overlay treats any console.error call as a crash and shows its red error screen for it.
+// Filtering by this known-benign substring (rather than silencing console.error outright)
+// keeps real errors from the tracker visible while dropping just this noise.
+const BENIGN_MEDIAPIPE_LOG = /xnnpack|tensorflow lite|inference_feedback_manager/i;
+
+if (typeof window !== "undefined" && !(window as unknown as { __mediapipeLogPatched?: boolean }).__mediapipeLogPatched) {
+  (window as unknown as { __mediapipeLogPatched: boolean }).__mediapipeLogPatched = true;
+  for (const method of ["error", "info", "warn", "log"] as const) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      if (typeof args[0] === "string" && BENIGN_MEDIAPIPE_LOG.test(args[0])) return;
+      original(...args);
+    };
+  }
+}
+
 let landmarkerPromise: Promise<FaceLandmarker> | null = null;
 
 export function getFaceLandmarker(): Promise<FaceLandmarker> {
@@ -69,8 +87,8 @@ function computeBox(
     if (pt.y > maxY) maxY = pt.y;
   }
 
-  const width = Math.max(0.02, maxX - minX + padX * 2);
-  const height = Math.max(0.02, maxY - minY + padY * 2);
+  const width = Math.max(0.012, maxX - minX + padX * 2);
+  const height = Math.max(0.012, maxY - minY + padY * 2);
   const x = Math.max(0, minX - padX);
   const y = Math.max(0, minY - padY);
 
@@ -173,8 +191,8 @@ export function createEyeGazeTracker() {
       const teleprompterConfidence = teleprompterReading ? Math.min(0.95, 0.65 + sweepCycles * 0.1) : 0;
 
       // Extract left & right eye bounding boxes with appropriate padding
-      const rightEyeBox = computeBox(landmarks, RIGHT_EYE_INDICES, 0.015, 0.018);
-      const leftEyeBox = computeBox(landmarks, LEFT_EYE_INDICES, 0.015, 0.018);
+      const rightEyeBox = computeBox(landmarks, RIGHT_EYE_INDICES, 0.006, 0.008);
+      const leftEyeBox = computeBox(landmarks, LEFT_EYE_INDICES, 0.006, 0.008);
 
       // Compute face bounding box
       let minFx = Infinity, maxFx = -Infinity, minFy = Infinity, maxFy = -Infinity;
