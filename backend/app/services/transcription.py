@@ -18,6 +18,30 @@ def transcribe_recording(absolute_path: str) -> str:
     return text
 
 
+# Silence/background noise is Whisper's classic failure mode: rather than returning empty
+# text, it tends to hallucinate short filler phrases ("Thank you.", "Bye.") on clips with no
+# real speech. no_speech_prob (only present in verbose_json, not the plain "text" format) is
+# the documented way to catch most of these before they reach a live feed.
+NO_SPEECH_THRESHOLD = 0.6
+
+
+def transcribe_short_clip(absolute_path: str) -> str:
+    """Transcribes one short, independent audio clip (a few seconds) with no segment
+    timestamps — the caller already knows this clip's own offset, so there's nothing to
+    align. Backs the live, browser-agnostic transcript panel (see the live-transcript-chunk
+    endpoints in interviews.py): short clips recorded and uploaded every few seconds, as a
+    chunked alternative to the browser's own SpeechRecognition API, which only exists in
+    Chromium browsers and is known to silently drop results even there."""
+    with open(absolute_path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            model=TRANSCRIBE_MODEL, file=f, response_format="verbose_json", language="en"
+        )
+    segments = result.segments or []
+    if segments and all((seg.no_speech_prob or 0.0) > NO_SPEECH_THRESHOLD for seg in segments):
+        return ""
+    return (result.text or "").strip()
+
+
 def transcribe_with_segments(absolute_path: str) -> tuple[str, list[dict]]:
     """Returns (full_text, segments) where each segment has start/end seconds relative to
     the start of this specific audio file — needed to align two separately-recorded tracks
@@ -53,7 +77,16 @@ def transcribe_with_segments(absolute_path: str) -> tuple[str, list[dict]]:
 def _transcribe_chunk(path: str, offset_seconds: float) -> tuple[str, list[dict]]:
     with open(path, "rb") as f:
         result = client.audio.transcriptions.create(
-            model=TRANSCRIBE_MODEL, file=f, response_format="verbose_json"
+            model=TRANSCRIBE_MODEL,
+            file=f,
+            response_format="verbose_json",
+            # Without this, Whisper auto-detects the spoken language per chunk — and on
+            # quiet/accented/noisy audio it sometimes misdetects English as Tamil, Hindi, or
+            # another language entirely, transcribing real English speech into that
+            # language's script instead of just getting the words wrong. Pinning it here is
+            # the documented fix; only safe because every interview on this platform is
+            # conducted in English — revisit if that ever stops being true.
+            language="en",
         )
     segments = [
         {"start": seg.start + offset_seconds, "end": seg.end + offset_seconds, "text": seg.text.strip()}

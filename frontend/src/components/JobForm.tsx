@@ -5,13 +5,14 @@ import { postJson } from "@/lib/api";
 import type { Job, JobLevel, WorkMode } from "@/lib/types";
 import { getScoreLabel, STRICTNESS_PRESETS, type StrictnessKey } from "@/lib/scoreLabel";
 
-type WeightCategory = "skills" | "experience" | "education" | "certifications";
+type WeightCategory = "skills" | "experience" | "education" | "certifications" | "communication";
 
 const WEIGHT_CATEGORIES: { key: WeightCategory; label: string }[] = [
   { key: "skills", label: "Skills" },
   { key: "experience", label: "Experience" },
   { key: "education", label: "Education" },
   { key: "certifications", label: "Certifications" },
+  { key: "communication", label: "Communication" },
 ];
 
 export interface JobPayload {
@@ -31,6 +32,15 @@ export interface JobPayload {
   weight_experience: number;
   weight_education: number;
   weight_certifications: number;
+  weight_communication: number;
+  core_skills: string[];
+  secondary_skills: string[];
+  irrelevant_skills: string[];
+  is_campus_drive: boolean;
+  campus_min_cgpa: number | null;
+  campus_allowed_batches: number[];
+  campus_allowed_branches: string[];
+  campus_max_backlogs: number | null;
   require_desktop_probe: boolean;
 }
 
@@ -48,16 +58,29 @@ function matchingStrictness(approve: number, decline: number): StrictnessKey {
 
 /** Relative sliders, not percentages HR has to hand-balance — always scaled to sum to 1.0
  * before being sent to the API, so it's never possible to submit an invalid combination. */
-function normalizeWeights(skills: number, experience: number, education: number, certifications: number) {
-  const total = skills + experience + education + certifications;
+function normalizeWeights(
+  skills: number,
+  experience: number,
+  education: number,
+  certifications: number,
+  communication: number
+) {
+  const total = skills + experience + education + certifications + communication;
   if (total <= 0) {
-    return { weight_skills: 0.25, weight_experience: 0.25, weight_education: 0.25, weight_certifications: 0.25 };
+    return {
+      weight_skills: 0.2,
+      weight_experience: 0.2,
+      weight_education: 0.2,
+      weight_certifications: 0.2,
+      weight_communication: 0.2,
+    };
   }
   return {
     weight_skills: skills / total,
     weight_experience: experience / total,
     weight_education: education / total,
     weight_certifications: certifications / total,
+    weight_communication: communication / total,
   };
 }
 
@@ -68,49 +91,52 @@ const NO_PRIORITIES: Priorities = {
   experience: false,
   education: false,
   certifications: false,
+  communication: false,
 };
 
-/** A checked category counts double — this exact 2:1 ratio is what already produced the
- * old "prioritize skills"/"prioritize experience" presets (0.4 vs 0.2 base, i.e. 2:1), so
- * checking just one box reproduces those numbers exactly; checking several splits the
- * boost between them instead of stacking. */
 function rawUnitsFromPriorities(priorities: Priorities): Record<WeightCategory, number> {
   return {
     skills: priorities.skills ? 2 : 1,
     experience: priorities.experience ? 2 : 1,
     education: priorities.education ? 2 : 1,
     certifications: priorities.certifications ? 2 : 1,
+    communication: priorities.communication ? 2 : 1,
   };
 }
 
 function weightsFromPriorities(priorities: Priorities) {
   const units = rawUnitsFromPriorities(priorities);
-  return normalizeWeights(units.skills, units.experience, units.education, units.certifications);
+  return normalizeWeights(
+    units.skills,
+    units.experience,
+    units.education,
+    units.certifications,
+    units.communication
+  );
 }
 
-/** Reverse-engineers which checkboxes (if any) would reproduce a job's already-stored
- * weights, so editing an old job pre-checks the right boxes instead of always falling
- * back to custom sliders. Returns null if the stored weights don't match any checkbox
- * combination — the exact values are still preserved, just via the custom-weights sliders. */
 function matchingPriorities(
   skills: number,
   experience: number,
   education: number,
-  certifications: number
+  certifications: number,
+  communication: number
 ): Priorities | null {
-  for (let mask = 0; mask < 16; mask++) {
+  for (let mask = 0; mask < 32; mask++) {
     const candidate: Priorities = {
       skills: !!(mask & 1),
       experience: !!(mask & 2),
       education: !!(mask & 4),
       certifications: !!(mask & 8),
+      communication: !!(mask & 16),
     };
     const w = weightsFromPriorities(candidate);
     if (
-      Math.abs(w.weight_skills - skills) < 0.005 &&
-      Math.abs(w.weight_experience - experience) < 0.005 &&
-      Math.abs(w.weight_education - education) < 0.005 &&
-      Math.abs(w.weight_certifications - certifications) < 0.005
+      Math.abs(w.weight_skills - skills) < 0.01 &&
+      Math.abs(w.weight_experience - experience) < 0.01 &&
+      Math.abs(w.weight_education - education) < 0.01 &&
+      Math.abs(w.weight_certifications - certifications) < 0.01 &&
+      Math.abs(w.weight_communication - communication) < 0.01
     ) {
       return candidate;
     }
@@ -122,13 +148,15 @@ function formatNormalizedWeights(
   skills: number,
   experience: number,
   education: number,
-  certifications: number
+  certifications: number,
+  communication: number
 ): string {
-  const w = normalizeWeights(skills, experience, education, certifications);
+  const w = normalizeWeights(skills, experience, education, certifications, communication);
   const pct = (v: number) => `${Math.round(v * 100)}%`;
   return (
     `Skills ${pct(w.weight_skills)} · Experience ${pct(w.weight_experience)} · ` +
-    `Education ${pct(w.weight_education)} · Certifications ${pct(w.weight_certifications)}`
+    `Education ${pct(w.weight_education)} · Certs ${pct(w.weight_certifications)} · ` +
+    `Comm ${pct(w.weight_communication)}`
   );
 }
 
@@ -152,6 +180,15 @@ export default function JobForm({
   const [requiredSkills, setRequiredSkills] = useState(
     (defaultValues?.required_skills ?? []).join(", ")
   );
+  const [coreSkills, setCoreSkills] = useState(
+    (defaultValues?.core_skills ?? []).join(", ")
+  );
+  const [secondarySkills, setSecondarySkills] = useState(
+    (defaultValues?.secondary_skills ?? []).join(", ")
+  );
+  const [irrelevantSkills, setIrrelevantSkills] = useState(
+    (defaultValues?.irrelevant_skills ?? []).join(", ")
+  );
   const [level, setLevel] = useState<JobLevel>(defaultValues?.level ?? "experienced");
   const [workMode, setWorkMode] = useState<WorkMode>(defaultValues?.work_mode ?? "onsite");
   const [minYears, setMinYears] = useState(
@@ -169,18 +206,40 @@ export default function JobForm({
   const [salaryMax, setSalaryMax] = useState(
     defaultValues?.salary_band_max != null ? String(defaultValues.salary_band_max) : ""
   );
-  const [weightSkills, setWeightSkills] = useState(defaultValues?.weight_skills ?? 0.25);
-  const [weightExperience, setWeightExperience] = useState(defaultValues?.weight_experience ?? 0.25);
-  const [weightEducation, setWeightEducation] = useState(defaultValues?.weight_education ?? 0.25);
-  const [weightCertifications, setWeightCertifications] = useState(
-    defaultValues?.weight_certifications ?? 0.25
+
+  // Campus fields
+  const [isCampusDrive, setIsCampusDrive] = useState(defaultValues?.is_campus_drive ?? false);
+  const [campusMinCgpa, setCampusMinCgpa] = useState(
+    defaultValues?.campus_min_cgpa != null ? String(defaultValues.campus_min_cgpa) : ""
   );
+  const [campusAllowedBatches, setCampusAllowedBatches] = useState(
+    (defaultValues?.campus_allowed_batches ?? []).join(", ")
+  );
+  const [campusAllowedBranches, setCampusAllowedBranches] = useState(
+    (defaultValues?.campus_allowed_branches ?? []).join(", ")
+  );
+  const [campusMaxBacklogs, setCampusMaxBacklogs] = useState(
+    defaultValues?.campus_max_backlogs != null ? String(defaultValues.campus_max_backlogs) : ""
+  );
+
+  // 5 weights
+  const [weightSkills, setWeightSkills] = useState(defaultValues?.weight_skills ?? 0.2);
+  const [weightExperience, setWeightExperience] = useState(defaultValues?.weight_experience ?? 0.2);
+  const [weightEducation, setWeightEducation] = useState(defaultValues?.weight_education ?? 0.2);
+  const [weightCertifications, setWeightCertifications] = useState(
+    defaultValues?.weight_certifications ?? 0.2
+  );
+  const [weightCommunication, setWeightCommunication] = useState(
+    defaultValues?.weight_communication ?? 0.2
+  );
+
   const initialPriorities = defaultValues
     ? matchingPriorities(
         defaultValues.weight_skills,
         defaultValues.weight_experience,
         defaultValues.weight_education,
-        defaultValues.weight_certifications
+        defaultValues.weight_certifications,
+        defaultValues.weight_communication ?? 0.2
       )
     : NO_PRIORITIES;
   const [priorities, setPriorities] = useState<Priorities>(initialPriorities ?? NO_PRIORITIES);
@@ -208,9 +267,6 @@ export default function JobForm({
     }
   }
 
-  // Clamped so the two sliders can never cross — if they did, every candidate would land
-  // in Approved or Declined and the human-review bucket would silently disappear (triage
-  // checks approve_threshold before decline_threshold).
   function handleApproveThresholdChange(value: number) {
     setApproveThreshold(Math.max(value, declineThreshold + 1));
   }
@@ -223,6 +279,7 @@ export default function JobForm({
     setWeightExperience(w.weight_experience);
     setWeightEducation(w.weight_education);
     setWeightCertifications(w.weight_certifications);
+    setWeightCommunication(w.weight_communication);
   }
 
   function handlePriorityToggle(category: WeightCategory) {
@@ -234,9 +291,6 @@ export default function JobForm({
   function handleCustomWeightsToggle(next: boolean) {
     setUseCustomWeights(next);
     if (!next) {
-      // Switching back from hand-tuned sliders to checkboxes snaps the weights back to
-      // whatever the currently-checked boxes produce, rather than leaving a mismatch
-      // between "no boxes checked" and stale slider-tweaked weights.
       applyWeights(weightsFromPriorities(priorities));
     }
   }
@@ -271,6 +325,9 @@ export default function JobForm({
         title,
         jd_text: jdText,
         required_skills: splitList(requiredSkills),
+        core_skills: splitList(coreSkills),
+        secondary_skills: splitList(secondarySkills),
+        irrelevant_skills: splitList(irrelevantSkills),
         level,
         work_mode: workMode,
         min_years_experience: minYears ? Number(minYears) : null,
@@ -280,7 +337,18 @@ export default function JobForm({
         salary_band_max: salaryMax ? Number(salaryMax) : null,
         approve_threshold: approveThreshold,
         decline_threshold: declineThreshold,
-        ...normalizeWeights(weightSkills, weightExperience, weightEducation, weightCertifications),
+        ...normalizeWeights(
+          weightSkills,
+          weightExperience,
+          weightEducation,
+          weightCertifications,
+          weightCommunication
+        ),
+        is_campus_drive: isCampusDrive,
+        campus_min_cgpa: campusMinCgpa ? Number(campusMinCgpa) : null,
+        campus_allowed_batches: splitList(campusAllowedBatches).map(Number).filter((n) => !isNaN(n)),
+        campus_allowed_branches: splitList(campusAllowedBranches),
+        campus_max_backlogs: campusMaxBacklogs ? Number(campusMaxBacklogs) : null,
         require_desktop_probe: requireDesktopProbe,
       });
     } catch (err) {
@@ -320,14 +388,45 @@ export default function JobForm({
         />
       </Field>
 
-      <Field label="Required skills (comma-separated)">
-        <input
-          value={requiredSkills}
-          onChange={(e) => setRequiredSkills(e.target.value)}
-          className="input"
-          placeholder="Python, AWS, PostgreSQL"
-        />
-      </Field>
+      <div className="space-y-3 rounded-md border border-zinc-200 p-3 bg-zinc-50/50">
+        <p className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
+          Skill Relevancy & Categorization
+        </p>
+        <Field label="Required Skills (primary list, comma-separated)">
+          <input
+            value={requiredSkills}
+            onChange={(e) => setRequiredSkills(e.target.value)}
+            className="input bg-white"
+            placeholder="Python, AWS, PostgreSQL"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Core / Mandatory Skills">
+            <input
+              value={coreSkills}
+              onChange={(e) => setCoreSkills(e.target.value)}
+              className="input bg-white text-xs"
+              placeholder="FastAPI, Docker, SQL"
+            />
+          </Field>
+          <Field label="Secondary / Good-to-have Skills">
+            <input
+              value={secondarySkills}
+              onChange={(e) => setSecondarySkills(e.target.value)}
+              className="input bg-white text-xs"
+              placeholder="Redis, Kubernetes, GraphQL"
+            />
+          </Field>
+        </div>
+        <Field label="Irrelevant / Out-of-Scope Skills (penalized if stuffed)">
+          <input
+            value={irrelevantSkills}
+            onChange={(e) => setIrrelevantSkills(e.target.value)}
+            className="input bg-white text-xs"
+            placeholder="Photoshop, Graphic Design, WordPress"
+          />
+        </Field>
+      </div>
 
       <div className="grid grid-cols-2 gap-4">
         <Field label="Level">
@@ -404,17 +503,70 @@ export default function JobForm({
             />
           </div>
           <p className="text-xs text-zinc-500 mt-1">
-            Candidates whose expected salary is above the max are knocked out. Notice
-            period/salary rarely appear on a resume itself — HR usually fills these in from a
-            screening call.
+            Candidates whose expected salary is above the max are knocked out.
           </p>
         </Field>
       </div>
 
-      <Field label="Fit-score priorities">
+      {/* Campus Drive Section */}
+      <div className="rounded-md border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
+        <label className="flex items-center gap-2 text-sm font-semibold text-indigo-900 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={isCampusDrive}
+            onChange={(e) => setIsCampusDrive(e.target.checked)}
+            className="accent-indigo-600 rounded"
+          />
+          Enable Campus Recruitment / College Hiring Mode
+        </label>
+        {isCampusDrive && (
+          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-indigo-100">
+            <Field label="Minimum CGPA / Percentage Cutoff">
+              <input
+                type="number"
+                step="0.1"
+                min={0}
+                max={100}
+                value={campusMinCgpa}
+                onChange={(e) => setCampusMinCgpa(e.target.value)}
+                className="input bg-white text-xs"
+                placeholder="e.g. 7.5 (or 70%)"
+              />
+            </Field>
+            <Field label="Max Allowable Standing Backlogs">
+              <input
+                type="number"
+                min={0}
+                value={campusMaxBacklogs}
+                onChange={(e) => setCampusMaxBacklogs(e.target.value)}
+                className="input bg-white text-xs"
+                placeholder="e.g. 0"
+              />
+            </Field>
+            <Field label="Eligible Passing Batches (comma-separated)">
+              <input
+                value={campusAllowedBatches}
+                onChange={(e) => setCampusAllowedBatches(e.target.value)}
+                className="input bg-white text-xs"
+                placeholder="2025, 2026"
+              />
+            </Field>
+            <Field label="Eligible Degrees / Branches (comma-separated)">
+              <input
+                value={campusAllowedBranches}
+                onChange={(e) => setCampusAllowedBranches(e.target.value)}
+                className="input bg-white text-xs"
+                placeholder="CSE, IT, ECE, EEE"
+              />
+            </Field>
+          </div>
+        )}
+      </div>
+
+      <Field label="Fit-score priorities (5 Categories)">
         {!useCustomWeights ? (
           <>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {WEIGHT_CATEGORIES.map(({ key, label }) => (
                 <label key={key} className="flex items-center gap-2 text-sm">
                   <input
@@ -427,10 +579,15 @@ export default function JobForm({
               ))}
             </div>
             <p className="text-xs text-zinc-600 mt-2">
-              Check any combination to weight the AI&apos;s fit score toward it — leave every box
-              unchecked to score skills, experience, education, and certifications equally. Right
-              now that works out to:{" "}
-              {formatNormalizedWeights(weightSkills, weightExperience, weightEducation, weightCertifications)}.
+              Check any combination to weight the AI&apos;s fit score toward it — leave all
+              unchecked for equal weights. Right now that works out to:{" "}
+              {formatNormalizedWeights(
+                weightSkills,
+                weightExperience,
+                weightEducation,
+                weightCertifications,
+                weightCommunication
+              )}.
             </p>
           </>
         ) : (
@@ -444,11 +601,21 @@ export default function JobForm({
                 value={weightCertifications}
                 onChange={setWeightCertifications}
               />
+              <WeightField
+                label="Communication"
+                value={weightCommunication}
+                onChange={setWeightCommunication}
+              />
             </div>
             <p className="text-xs text-zinc-600">
-              These are relative — no need to make them add up to anything. They&apos;re scaled
-              automatically when you save. Right now that works out to:{" "}
-              {formatNormalizedWeights(weightSkills, weightExperience, weightEducation, weightCertifications)}.
+              Relative weights scaled automatically to sum to 100%:{" "}
+              {formatNormalizedWeights(
+                weightSkills,
+                weightExperience,
+                weightEducation,
+                weightCertifications,
+                weightCommunication
+              )}.
             </p>
           </div>
         )}
@@ -468,13 +635,8 @@ export default function JobForm({
             checked={requireDesktopProbe}
             onChange={(e) => setRequireDesktopProbe(e.target.checked)}
           />
-          Require the desktop probe (background-app/external-display monitor) before the
-          candidate can start this role&apos;s interview
+          Require the desktop probe (background-app/external-display monitor) before candidate can start
         </label>
-        <p className="text-xs text-zinc-500 mt-1">
-          Only enable this where candidates can realistically install/run it — it will block
-          candidates on locked-down corporate laptops with no admin rights.
-        </p>
       </Field>
 
       <Field label="Screening strictness">
@@ -491,7 +653,7 @@ export default function JobForm({
           <option value="custom">Custom</option>
         </select>
 
-        {strictness === "custom" ? (
+        {strictness === "custom" && (
           <div className="mt-3 space-y-4 rounded-md border border-blue-200 bg-blue-50 p-3">
             <SliderField
               label="Auto-approve candidates who are at least a…"
@@ -503,16 +665,7 @@ export default function JobForm({
               value={declineThreshold}
               onChange={handleDeclineThresholdChange}
             />
-            <p className="text-xs text-zinc-600">
-              Everyone in between lands in Review for a human to look at.
-            </p>
           </div>
-        ) : (
-          <p className="text-xs text-zinc-600 mt-1">
-            Candidates rated <strong>{getScoreLabel(approveThreshold)}</strong> or better go
-            straight to Approved. Below <strong>{getScoreLabel(declineThreshold)}</strong> go to
-            Declined. Everyone else lands in Review for a human to look at.
-          </p>
         )}
       </Field>
 

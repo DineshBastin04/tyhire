@@ -12,15 +12,20 @@ import logging
 import sys
 
 from app.db.session import SessionLocal
-from app.services.retention import purge_expired_identity_media
+from app.services.retention import purge_expired_identity_media, purge_expired_l1_recordings
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     db = SessionLocal()
     try:
-        cleared = purge_expired_identity_media(db)
-        logging.getLogger(__name__).info("retention sweep complete: %d identity check(s) cleared", cleared)
+        cleared_id = purge_expired_identity_media(db)
+        cleared_l1 = purge_expired_l1_recordings(db)
+        logging.getLogger(__name__).info(
+            "retention sweep complete: %d identity check(s) and %d L1 recording(s) cleared",
+            cleared_id,
+            cleared_l1,
+        )
         return 0
     except Exception:
         logging.getLogger(__name__).exception("retention sweep failed")

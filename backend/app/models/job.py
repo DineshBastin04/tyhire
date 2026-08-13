@@ -41,11 +41,26 @@ class Job(Base):
     decline_threshold = Column(Integer, default=40)
 
     # Per-category weights the deterministic overall fit_score is computed from
-    # (services/scoring.py) — must sum to 1.0, validated at job create/update time.
-    weight_skills = Column(Float, default=0.25)
-    weight_experience = Column(Float, default=0.25)
-    weight_education = Column(Float, default=0.25)
-    weight_certifications = Column(Float, default=0.25)
+    # (services/scoring.py) — validated at job create/update time.
+    # Default 0.20 across categories in schemas; DB column default for weight_communication
+    # is 0.0 to preserve legacy job scoring behaviour.
+    weight_skills = Column(Float, default=0.20)
+    weight_experience = Column(Float, default=0.20)
+    weight_education = Column(Float, default=0.20)
+    weight_certifications = Column(Float, default=0.20)
+    weight_communication = Column(Float, default=0.0)
+
+    # Granular skill relevancy configuration
+    core_skills = Column(JSON, default=list)
+    secondary_skills = Column(JSON, default=list)
+    irrelevant_skills = Column(JSON, default=list)
+
+    # Campus recruitment drive settings
+    is_campus_drive = Column(Boolean, default=False)
+    campus_min_cgpa = Column(Float, nullable=True)
+    campus_allowed_batches = Column(JSON, default=list)
+    campus_allowed_branches = Column(JSON, default=list)
+    campus_max_backlogs = Column(Integer, nullable=True)
 
     # Opt-in per-job: hard-blocks interview start until the desktop probe (background-app +
     # external-display monitor) has checked in. Off by default — many candidates use

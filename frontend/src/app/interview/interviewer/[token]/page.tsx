@@ -126,12 +126,24 @@ export default function InterviewerCapturePage() {
   const [callEnded, setCallEnded] = useState(false);
   const [joined, setJoined] = useState(false);
   const [callStartTime, setCallStartTime] = useState<number>(Date.now());
+  const [elapsedMs, setElapsedMs] = useState(0);
 
-  // Live Speech Recognition for interviewer
-  const {
-    liveItems: interviewerTranscriptItems,
-    currentInterim: interviewerInterim,
-  } = useLiveSpeech({
+  // Live call duration — ticks every second from the same callStartTime anchor everything
+  // else (live transcript offsets, sentiment sample offsets) is measured from, so this
+  // always matches the timestamps shown elsewhere instead of drifting from its own clock.
+  useEffect(() => {
+    if (!joined || callEnded) return;
+    setElapsedMs(Date.now() - callStartTime);
+    const timer = setInterval(() => setElapsedMs(Date.now() - callStartTime), 1000);
+    return () => clearInterval(timer);
+  }, [joined, callEnded, callStartTime]);
+
+  // Browser-agnostic live transcript capture for the interviewer's own side — records and
+  // uploads short chunks for server-side transcription rather than relying on the browser's
+  // own (Chromium-only, unreliable) SpeechRecognition API. isCapturing just drives a
+  // "recording…" indicator; the actual text comes back through the live-transcripts poll
+  // below once the backend finishes transcribing each chunk.
+  const { isCapturing: interviewerCapturing } = useLiveSpeech({
     sessionId: session?.id,
     speaker: "interviewer",
     enabled: joined && !callEnded,
@@ -218,9 +230,9 @@ export default function InterviewerCapturePage() {
     return () => clearInterval(interval);
   }, [session, callEnded]);
 
-  const allTranscripts = mergedLiveTranscripts.length > 0
-    ? mergedLiveTranscripts
-    : interviewerTranscriptItems;
+  // The only source now — both sides upload chunks for server-side transcription and this
+  // polls the merged result back; neither side produces any transcript text locally anymore.
+  const allTranscripts = mergedLiveTranscripts;
 
   // Real-time answer evaluation trigger
   const runAnswerEvaluation = useCallback(async (customSpeech?: string) => {
@@ -435,6 +447,15 @@ export default function InterviewerCapturePage() {
         </div>
 
         <div className="flex items-center gap-3">
+          {joined && !callEnded && (
+            <div className="flex items-center gap-2 px-3 py-1 bg-white border border-zinc-200 rounded-full text-xs shadow-xs">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-zinc-700 text-xs font-semibold font-mono">
+                {formatOffset(elapsedMs)}
+              </span>
+            </div>
+          )}
+
           {joined && !callEnded && isTeleprompterReading && (
             <div className="flex items-center gap-2 px-3 py-1 bg-purple-50 border border-purple-300 rounded-full text-xs animate-pulse">
               <span className="w-2.5 h-2.5 rounded-full bg-purple-600 shadow-[0_0_8px_#9333ea]" />
@@ -781,7 +802,7 @@ export default function InterviewerCapturePage() {
                 <div className="space-y-2">
                   <LiveTranscriptFeed
                     items={allTranscripts}
-                    interviewerInterim={interviewerInterim}
+                    interviewerCapturing={interviewerCapturing}
                     className="h-[390px]"
                   />
                   {/* Quick Speech / Utterance Entry Bar */}
@@ -816,50 +837,70 @@ export default function InterviewerCapturePage() {
                     </span>
                   </div>
 
-                  {/* Tension Level Meter */}
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-600 font-medium">Candidate Emotional Tension:</span>
-                      <span
-                        className={`font-bold capitalize ${
-                          latestSentiment?.facial_affect?.tension_level === "high"
-                            ? "text-red-600"
-                            : latestSentiment?.facial_affect?.tension_level === "medium"
-                            ? "text-amber-600"
-                            : "text-emerald-600"
-                        }`}
-                      >
-                        {latestSentiment?.facial_affect?.tension_level ?? "Low (Calm & Composed)"}
-                      </span>
+                  {!latestSentiment ? (
+                    // Distinct from an actual "calm" reading below — samples are taken every
+                    // 60s and take a moment to process, so without this the panel showed the
+                    // exact same "Low / Calm & Composed" defaults whether that was a real AI
+                    // reading or just no data yet, with no way to tell the two apart.
+                    <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 text-center space-y-1">
+                      <p className="text-xs font-semibold text-zinc-500">
+                        ⏳ Waiting for the first sentiment reading…
+                      </p>
+                      <p className="text-[11px] text-zinc-400">
+                        Samples are taken every 60s and take a few seconds to process.
+                      </p>
                     </div>
-                    <div className="w-full bg-zinc-200 rounded-full h-2.5 overflow-hidden flex">
-                      <div className="bg-emerald-500 h-full w-1/3" />
-                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "medium" || latestSentiment?.facial_affect?.tension_level === "high" ? "bg-amber-500" : "bg-zinc-300"}`} />
-                      <div className={`h-full w-1/3 ${latestSentiment?.facial_affect?.tension_level === "high" ? "bg-red-500 animate-pulse" : "bg-zinc-300"}`} />
-                    </div>
-                  </div>
+                  ) : (
+                    <>
+                      {/* Tension Level Meter */}
+                      <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-zinc-600 font-medium">Candidate Emotional Tension:</span>
+                          <span
+                            className={`font-bold capitalize ${
+                              latestSentiment.facial_affect?.tension_level === "high"
+                                ? "text-red-600"
+                                : latestSentiment.facial_affect?.tension_level === "medium"
+                                ? "text-amber-600"
+                                : "text-emerald-600"
+                            }`}
+                          >
+                            {latestSentiment.facial_affect?.tension_level ?? "Low"}
+                          </span>
+                        </div>
+                        <div className="w-full bg-zinc-200 rounded-full h-2.5 overflow-hidden flex">
+                          <div className="bg-emerald-500 h-full w-1/3" />
+                          <div className={`h-full w-1/3 ${latestSentiment.facial_affect?.tension_level === "medium" || latestSentiment.facial_affect?.tension_level === "high" ? "bg-amber-500" : "bg-zinc-300"}`} />
+                          <div className={`h-full w-1/3 ${latestSentiment.facial_affect?.tension_level === "high" ? "bg-red-500 animate-pulse" : "bg-zinc-300"}`} />
+                        </div>
+                        <p className="text-[10px] text-zinc-400 text-right">
+                          as of {formatOffset(latestSentiment.session_offset_ms)}
+                        </p>
+                      </div>
 
-                  {/* Facial Affect */}
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
-                    <span className="text-[11px] uppercase font-bold text-zinc-500">Observable Facial Affect</span>
-                    <p className="text-sm font-bold capitalize text-zinc-900">
-                      {latestSentiment?.facial_affect?.overall_affect ?? "Focused & Attentive"}
-                    </p>
-                    {latestSentiment?.facial_affect?.notes && (
-                      <p className="text-xs text-zinc-500 mt-1">{latestSentiment.facial_affect.notes}</p>
-                    )}
-                  </div>
+                      {/* Facial Affect */}
+                      <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
+                        <span className="text-[11px] uppercase font-bold text-zinc-500">Observable Facial Affect</span>
+                        <p className="text-sm font-bold capitalize text-zinc-900">
+                          {latestSentiment.facial_affect?.overall_affect ?? "Not detected"}
+                        </p>
+                        {latestSentiment.facial_affect?.notes && (
+                          <p className="text-xs text-zinc-500 mt-1">{latestSentiment.facial_affect.notes}</p>
+                        )}
+                      </div>
 
-                  {/* Voice Tone */}
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
-                    <span className="text-[11px] uppercase font-bold text-zinc-500">Voice Tone & Pitch</span>
-                    <p className="text-sm font-bold capitalize text-zinc-900">
-                      {latestSentiment?.voice_tone?.overall_tone ?? "Natural Conversational Flow"}
-                    </p>
-                    {latestSentiment?.voice_tone?.notes && (
-                      <p className="text-xs text-zinc-500 mt-1">{latestSentiment.voice_tone.notes}</p>
-                    )}
-                  </div>
+                      {/* Voice Tone */}
+                      <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">
+                        <span className="text-[11px] uppercase font-bold text-zinc-500">Voice Tone & Pitch</span>
+                        <p className="text-sm font-bold capitalize text-zinc-900">
+                          {latestSentiment.voice_tone?.overall_tone ?? "Not detected"}
+                        </p>
+                        {latestSentiment.voice_tone?.notes && (
+                          <p className="text-xs text-zinc-500 mt-1">{latestSentiment.voice_tone.notes}</p>
+                        )}
+                      </div>
+                    </>
+                  )}
 
                   {/* Eye Tracking Telemetry State */}
                   <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-1">

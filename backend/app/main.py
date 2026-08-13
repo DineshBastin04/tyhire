@@ -61,21 +61,52 @@ def on_startup():
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
+            
+            # Phase 1 & 3 Job and Candidate columns
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weight_communication FLOAT DEFAULT 0.0;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS core_skills JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS secondary_skills JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS irrelevant_skills JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_campus_drive BOOLEAN DEFAULT FALSE;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS campus_min_cgpa FLOAT;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS campus_allowed_batches JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS campus_allowed_branches JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS campus_max_backlogs INTEGER;"))
+            
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS technical_score FLOAT;"))
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS communication_score FLOAT;"))
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS skills_breakdown JSONB;"))
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS profession_fit JSONB;"))
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS campus_metadata JSONB;"))
     except Exception as exc:
         logger.debug("PostgreSQL startup migration notice: %s", exc)
 
     # SQLite fallback column check
     db = SessionLocal()
-    try:
-        db.execute(text("ALTER TABLE interview_sessions ADD COLUMN qa_evaluations JSON DEFAULT '[]';"))
-        db.commit()
-    except Exception:
-        pass
-    try:
-        db.execute(text("ALTER TABLE identity_checks ADD COLUMN voice_enrollment_path VARCHAR;"))
-        db.commit()
-    except Exception:
-        pass
+    sqlite_cols = [
+        ("interview_sessions", "qa_evaluations", "JSON DEFAULT '[]'"),
+        ("identity_checks", "voice_enrollment_path", "VARCHAR"),
+        ("jobs", "weight_communication", "FLOAT DEFAULT 0.0"),
+        ("jobs", "core_skills", "JSON DEFAULT '[]'"),
+        ("jobs", "secondary_skills", "JSON DEFAULT '[]'"),
+        ("jobs", "irrelevant_skills", "JSON DEFAULT '[]'"),
+        ("jobs", "is_campus_drive", "BOOLEAN DEFAULT 0"),
+        ("jobs", "campus_min_cgpa", "FLOAT"),
+        ("jobs", "campus_allowed_batches", "JSON DEFAULT '[]'"),
+        ("jobs", "campus_allowed_branches", "JSON DEFAULT '[]'"),
+        ("jobs", "campus_max_backlogs", "INTEGER"),
+        ("candidates", "technical_score", "FLOAT"),
+        ("candidates", "communication_score", "FLOAT"),
+        ("candidates", "skills_breakdown", "JSON"),
+        ("candidates", "profession_fit", "JSON"),
+        ("candidates", "campus_metadata", "JSON"),
+    ]
+    for table, col, col_type in sqlite_cols:
+        try:
+            db.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};"))
+            db.commit()
+        except Exception:
+            pass
     db.close()
 
     _bootstrap_initial_admin()
@@ -106,9 +137,11 @@ async def _retention_sweep_loop():
 
 
 def _run_retention_sweep_once():
+    from app.services.retention import purge_expired_l1_recordings
     db = SessionLocal()
     try:
         purge_expired_identity_media(db)
+        purge_expired_l1_recordings(db)
     finally:
         db.close()
 

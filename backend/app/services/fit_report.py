@@ -8,6 +8,7 @@ CATEGORY_LABELS = {
     "experience": "Experience",
     "education": "Education",
     "certifications": "Certifications",
+    "communication": "Communication",
 }
 
 # The built-in "Helvetica" PDF font only supports Latin-1 — LLM-generated reason text
@@ -71,7 +72,7 @@ def build_fit_report_pdf(candidate: Candidate, job: Job) -> bytes:
         effective = candidate.fit_score + (candidate.manual_score_adjustment or 0)
         effective = max(0.0, min(100.0, effective))
         pdf.cell(
-            0, 8, f"Overall fit: {_score_label(effective)} ({effective:.0f}/100)",
+            0, 8, f"Overall Fit: {_score_label(effective)} ({effective:.0f}/100)",
             new_x="LMARGIN", new_y="NEXT",
         )
         if candidate.manual_score_adjustment:
@@ -84,6 +85,12 @@ def build_fit_report_pdf(candidate: Candidate, job: Job) -> bytes:
                 f"{candidate.manual_score_adjustment}: {adjustment_reason})",
                 new_x="LMARGIN", new_y="NEXT",
             )
+        
+        # Dual Technical & Communication Scores
+        pdf.set_font("Helvetica", "B", 11)
+        tech_str = f"Technical Score: {candidate.technical_score:.0f}/100" if candidate.technical_score is not None else "Technical Score: N/A"
+        comm_str = f"Communication Score: {candidate.communication_score:.0f}/100" if candidate.communication_score is not None else "Communication Score: N/A"
+        pdf.cell(0, 6, f"{tech_str}   |   {comm_str}", new_x="LMARGIN", new_y="NEXT")
     else:
         pdf.cell(0, 8, "Overall fit: not scored", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
@@ -102,9 +109,41 @@ def build_fit_report_pdf(candidate: Candidate, job: Job) -> bytes:
             pdf.multi_cell(0, 6, f"- {_sanitize(reason)}", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
 
+    # Skill Relevancy Breakdown
+    if candidate.skills_breakdown:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Skills Relevancy Matrix", new_x="LMARGIN", new_y="NEXT")
+        
+        rel = candidate.skills_breakdown.get("relevant_skills", [])
+        miss = candidate.skills_breakdown.get("missing_critical_skills", [])
+        irrel = candidate.skills_breakdown.get("irrelevant_skills", [])
+        
+        pdf.set_font("Helvetica", "B", 10)
+        if rel:
+            pdf.cell(0, 6, f"Matched / Relevant Skills: {', '.join(_sanitize(s) for s in rel)}", new_x="LMARGIN", new_y="NEXT")
+        if miss:
+            pdf.cell(0, 6, f"Missing Critical Skills: {', '.join(_sanitize(s) for s in miss)}", new_x="LMARGIN", new_y="NEXT")
+        if irrel:
+            pdf.cell(0, 6, f"Irrelevant / Out-of-Scope Skills: {', '.join(_sanitize(s) for s in irrel)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+    # Profession Screening
+    if candidate.profession_fit:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Profession & Career Trajectory", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        pfit = candidate.profession_fit
+        sen = _sanitize(pfit.get("seniority_match", "N/A"))
+        dom = _sanitize(pfit.get("domain_alignment", "N/A"))
+        verd = _sanitize(pfit.get("verdict", "aligned")).capitalize()
+        pdf.cell(0, 6, f"Verdict: {verd}  |  Seniority: {sen}  |  Domain: {dom}", new_x="LMARGIN", new_y="NEXT")
+        for insight in pfit.get("insights", []):
+            pdf.multi_cell(0, 6, f"- {_sanitize(insight)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
     if candidate.score_breakdown:
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, "Score breakdown", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 8, "Score Breakdown", new_x="LMARGIN", new_y="NEXT")
         for category, label in CATEGORY_LABELS.items():
             entry = candidate.score_breakdown.get(category)
             if not entry:

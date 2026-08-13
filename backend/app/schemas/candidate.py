@@ -22,8 +22,13 @@ class CandidateOut(BaseModel):
     processing_failed: bool
     processing_error: Optional[str]
     fit_score: Optional[float]
+    technical_score: Optional[float] = None
+    communication_score: Optional[float] = None
     score_reasons: list[str]
     score_breakdown: Optional[dict[str, Any]]
+    skills_breakdown: Optional[dict[str, Any]] = None
+    profession_fit: Optional[dict[str, Any]] = None
+    campus_metadata: Optional[dict[str, Any]] = None
     manual_score_adjustment: Optional[int]
     manual_adjustment_reason: Optional[str]
     bucket: Optional[Bucket]

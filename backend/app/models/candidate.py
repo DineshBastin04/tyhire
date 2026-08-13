@@ -56,8 +56,13 @@ class Candidate(Base):
     # deterministic `fit_score` is computed from (see services/scoring.py); score_reasons
     # is kept as a flattened view across all categories for backward-compatible display.
     fit_score = Column(Float, nullable=True)
+    technical_score = Column(Float, nullable=True)
+    communication_score = Column(Float, nullable=True)
     score_reasons = Column(JSON, default=list)
     score_breakdown = Column(JSON, nullable=True)
+    skills_breakdown = Column(JSON, nullable=True)
+    profession_fit = Column(JSON, nullable=True)
+    campus_metadata = Column(JSON, nullable=True)
 
     # HR-entered adjustment on top of the AI score (e.g. a competing offer, a referral signal)
     # — always shown separately from the AI sub-scores, never silently folded into them.

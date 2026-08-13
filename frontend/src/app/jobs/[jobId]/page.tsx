@@ -6,6 +6,7 @@ import Link from "next/link";
 import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
 import { getScoreLabel } from "@/lib/scoreLabel";
 import JobForm, { type JobPayload } from "@/components/JobForm";
+import CampusBulkUploader from "@/components/CampusBulkUploader";
 import { useDialog } from "@/components/Dialog";
 import type { Bucket, Candidate, Job } from "@/lib/types";
 
@@ -30,6 +31,7 @@ export default function JobDetailPage() {
   const [uploadSource, setUploadSource] = useState("");
   const [notFound, setNotFound] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [isCampusBulkOpen, setIsCampusBulkOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
@@ -134,22 +136,35 @@ export default function JobDetailPage() {
         </div>
       )}
 
-      <div className="border border-zinc-200 rounded-md p-4 flex items-center gap-3 flex-wrap">
-        <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx" />
-        <input
-          value={uploadSource}
-          onChange={(e) => setUploadSource(e.target.value)}
-          placeholder="Source (optional): referral, LinkedIn…"
-          className="input w-56"
-        />
-        <button onClick={handleUpload} disabled={uploading} className="btn-primary">
-          {uploading ? "Processing…" : "Upload resumes"}
+      <div className="border border-zinc-200 rounded-md p-4 flex items-center justify-between gap-3 flex-wrap bg-zinc-50/50">
+        <div className="flex items-center gap-3 flex-wrap">
+          <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx" />
+          <input
+            value={uploadSource}
+            onChange={(e) => setUploadSource(e.target.value)}
+            placeholder="Source (optional): referral, LinkedIn…"
+            className="input w-56 bg-white"
+          />
+          <button onClick={handleUpload} disabled={uploading} className="btn-primary">
+            {uploading ? "Processing…" : "Upload resumes"}
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setIsCampusBulkOpen(true)}
+          className="btn-outline border-indigo-300 text-indigo-800 bg-indigo-50/60 hover:bg-indigo-100 flex items-center gap-1.5 text-xs font-semibold px-3 py-2"
+        >
+          🎓 Campus Bulk Drive Screening
         </button>
-        <span className="text-xs text-zinc-500">
-          Each resume is parsed, deduped, checked against eligibility requirements, and
-          scored automatically.
-        </span>
       </div>
+
+      <CampusBulkUploader
+        jobId={jobId}
+        isOpen={isCampusBulkOpen}
+        onClose={() => setIsCampusBulkOpen(false)}
+        onBatchComplete={refresh}
+      />
 
       {candidates.some((c) => c.processing_failed) && (
         <div className="border border-amber-300 bg-amber-50 rounded-md p-3">
@@ -258,20 +273,57 @@ function CandidateCard({ candidate }: { candidate: Candidate }) {
   return (
     <Link
       href={`/candidates/${candidate.id}`}
-      className="block bg-white border border-zinc-200 rounded-md p-2 text-sm hover:border-zinc-300 hover:shadow-sm"
+      className="block bg-white border border-zinc-200 rounded-md p-2.5 text-sm hover:border-zinc-300 hover:shadow-sm transition space-y-1.5"
     >
-      <div className="flex justify-between items-center">
-        <span className="font-medium text-zinc-900">
+      <div className="flex justify-between items-start">
+        <span className="font-medium text-zinc-900 leading-tight">
           {candidate.full_name ?? candidate.email ?? "Unnamed candidate"}
         </span>
-        <span className="text-xs text-zinc-500">
+        <span className="text-xs font-semibold text-zinc-700 bg-zinc-100 px-1.5 py-0.5 rounded shrink-0 ml-2">
           {candidate.fit_score !== null
-            ? `${getScoreLabel(candidate.fit_score)} (${candidate.fit_score.toFixed(0)})`
+            ? `${candidate.fit_score.toFixed(0)}/100`
             : "—"}
         </span>
       </div>
+
+      {/* Dual Score Badges */}
+      {(candidate.technical_score !== null || candidate.communication_score !== null) && (
+        <div className="flex items-center gap-1.5 text-[11px]">
+          {candidate.technical_score !== null && (
+            <span className="bg-blue-50 text-blue-800 border border-blue-200 px-1.5 py-0.5 rounded font-medium">
+              Tech: {candidate.technical_score.toFixed(0)}
+            </span>
+          )}
+          {candidate.communication_score !== null && (
+            <span className="bg-purple-50 text-purple-800 border border-purple-200 px-1.5 py-0.5 rounded font-medium">
+              Comm: {candidate.communication_score.toFixed(0)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Skill & Profession chips summary */}
+      {candidate.skills_breakdown && candidate.skills_breakdown.relevant_skills.length > 0 && (
+        <div className="text-[11px] text-emerald-700 flex items-center gap-1">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+          <span>{candidate.skills_breakdown.relevant_skills.length} matched skills</span>
+          {candidate.skills_breakdown.missing_critical_skills.length > 0 && (
+            <span className="text-amber-700 ml-1">
+              · {candidate.skills_breakdown.missing_critical_skills.length} missing
+            </span>
+          )}
+        </div>
+      )}
+
+      {candidate.profession_fit && candidate.profession_fit.verdict && (
+        <div className="text-[10px] text-zinc-500 capitalize">
+          Role: <span className="font-medium text-zinc-700">{candidate.profession_fit.verdict}</span>
+          {candidate.profession_fit.seniority_match && ` · ${candidate.profession_fit.seniority_match}`}
+        </div>
+      )}
+
       {candidate.override_bucket && (
-        <p className="text-xs text-zinc-500 mt-1">Overridden to {effectiveBucket}</p>
+        <p className="text-xs text-zinc-500">Overridden to {effectiveBucket}</p>
       )}
     </Link>
   );

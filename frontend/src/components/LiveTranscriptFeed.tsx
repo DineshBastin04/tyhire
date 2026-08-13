@@ -5,8 +5,9 @@ import type { LiveTranscriptItem } from "@/lib/useLiveSpeech";
 
 interface LiveTranscriptFeedProps {
   items: LiveTranscriptItem[];
-  currentInterim?: string;
-  interviewerInterim?: string;
+  /** True while the interviewer's own next chunk is actively being recorded — there's no
+   * live partial transcript text to show anymore (see useLiveSpeech), just a status. */
+  interviewerCapturing?: boolean;
   className?: string;
 }
 
@@ -19,15 +20,14 @@ function formatOffset(ms: number): string {
 
 export default function LiveTranscriptFeed({
   items,
-  currentInterim = "",
-  interviewerInterim = "",
+  interviewerCapturing = false,
   className = "",
 }: LiveTranscriptFeedProps) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [items, currentInterim, interviewerInterim]);
+  }, [items, interviewerCapturing]);
 
   return (
     <div className={`flex flex-col bg-white border border-zinc-200 rounded-xl p-3.5 text-sm text-zinc-900 shadow-sm ${className}`}>
@@ -43,10 +43,13 @@ export default function LiveTranscriptFeed({
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[360px] pr-1">
-        {items.length === 0 && !currentInterim && !interviewerInterim ? (
+        {items.length === 0 && !interviewerCapturing ? (
           <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400">
             <p className="text-xs font-medium">🎙️ Listening to conversation…</p>
-            <p className="text-[11px] text-zinc-400 mt-1">Spoken candidate and interviewer dialogue appears here live.</p>
+            <p className="text-[11px] text-zinc-400 mt-1">
+              Spoken candidate and interviewer dialogue appears here — each side is
+              transcribed in short chunks, so expect a few seconds of delay.
+            </p>
           </div>
         ) : (
           items.map((item) => (
@@ -75,21 +78,12 @@ export default function LiveTranscriptFeed({
           ))
         )}
 
-        {currentInterim && (
-          <div className="p-2.5 rounded-xl text-xs bg-blue-50/50 border border-blue-300 text-blue-900 animate-pulse">
-            <span className="font-bold uppercase text-[10px] px-2 py-0.5 rounded-full bg-blue-600 text-white mr-1.5">
-              Candidate speaking…
+        {interviewerCapturing && (
+          <div className="p-2 rounded-xl text-xs bg-purple-50/50 border border-purple-300 text-purple-900 animate-pulse flex items-center gap-1.5">
+            <span className="font-bold uppercase text-[10px] px-2 py-0.5 rounded-full bg-purple-600 text-white">
+              You
             </span>
-            <span className="italic font-medium">{currentInterim}</span>
-          </div>
-        )}
-
-        {interviewerInterim && (
-          <div className="p-2.5 rounded-xl text-xs bg-purple-50/50 border border-purple-300 text-purple-900 animate-pulse">
-            <span className="font-bold uppercase text-[10px] px-2 py-0.5 rounded-full bg-purple-600 text-white mr-1.5">
-              You speaking…
-            </span>
-            <span className="italic font-medium">{interviewerInterim}</span>
+            <span className="italic font-medium">Recording…</span>
           </div>
         )}
 

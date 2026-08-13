@@ -7,9 +7,10 @@ import { BASE_URL, deleteJson, getJson, postJson } from "@/lib/api";
 import { getIntegrityScoreBand } from "@/lib/integrityLabel";
 import { getScoreLabel } from "@/lib/scoreLabel";
 import { useDialog } from "@/components/Dialog";
+import L1AudioUploader from "@/components/L1AudioUploader";
 import type { Bucket, Candidate, InterviewSession } from "@/lib/types";
 
-const CATEGORIES = ["skills", "experience", "education", "certifications"] as const;
+const CATEGORIES = ["skills", "experience", "education", "certifications", "communication"] as const;
 
 export default function CandidateDetailPage() {
   const { prompt } = useDialog();
@@ -143,37 +144,74 @@ export default function CandidateDetailPage() {
         </p>
       </div>
 
-      <Section title="Resume fit">
+      <Section title="AI Evaluation & Fit Breakdown">
         {candidate.fit_score !== null ? (
-          <div className="space-y-3">
-            <p className="text-sm">
-              <span className="font-medium">
-                {getScoreLabel(candidate.fit_score)} ({candidate.fit_score.toFixed(0)})
-              </span>
-              {candidate.manual_score_adjustment ? (
-                <span className="text-blue-800">
-                  {" "}
-                  {candidate.manual_score_adjustment > 0 ? "+" : ""}
-                  {candidate.manual_score_adjustment} HR adjustment
+          <div className="space-y-4">
+            {/* Top Score Summary Cards */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="border border-zinc-200 bg-zinc-50/70 rounded-md p-3 text-center">
+                <p className="text-xs text-zinc-500 font-medium">Overall Fit</p>
+                <p className="text-2xl font-bold text-zinc-900 mt-0.5">
+                  {candidate.fit_score.toFixed(0)}
+                  <span className="text-xs font-normal text-zinc-400">/100</span>
+                </p>
+                <p className="text-[11px] text-zinc-600 font-medium mt-0.5">
+                  {getScoreLabel(candidate.fit_score)}
+                </p>
+              </div>
+
+              <div className="border border-blue-200 bg-blue-50/50 rounded-md p-3 text-center">
+                <p className="text-xs text-blue-700 font-medium">Technical Score</p>
+                <p className="text-2xl font-bold text-blue-950 mt-0.5">
+                  {candidate.technical_score !== null ? candidate.technical_score.toFixed(0) : "—"}
+                  <span className="text-xs font-normal text-blue-400">/100</span>
+                </p>
+                <p className="text-[11px] text-blue-700 font-medium mt-0.5">
+                  Skills & Tech Depth
+                </p>
+              </div>
+
+              <div className="border border-purple-200 bg-purple-50/50 rounded-md p-3 text-center">
+                <p className="text-xs text-purple-700 font-medium">Communication Score</p>
+                <p className="text-2xl font-bold text-purple-950 mt-0.5">
+                  {candidate.communication_score !== null ? candidate.communication_score.toFixed(0) : "—"}
+                  <span className="text-xs font-normal text-purple-400">/100</span>
+                </p>
+                <p className="text-[11px] text-purple-700 font-medium mt-0.5">
+                  Written Articulation
+                </p>
+              </div>
+            </div>
+
+            {candidate.manual_score_adjustment ? (
+              <div className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-2">
+                <span className="font-semibold">
+                  HR Adjustment: {candidate.manual_score_adjustment > 0 ? "+" : ""}
+                  {candidate.manual_score_adjustment} points
                 </span>
-              ) : null}
-            </p>
-            {candidate.manual_adjustment_reason && (
-              <p className="text-xs text-zinc-500">Adjustment reason: {candidate.manual_adjustment_reason}</p>
-            )}
+                {candidate.manual_adjustment_reason && (
+                  <span className="text-zinc-600"> — {candidate.manual_adjustment_reason}</span>
+                )}
+              </div>
+            ) : null}
+
+            {/* 5-Category Subscores */}
             {candidate.score_breakdown && (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-1">
                 {CATEGORIES.map((cat) => {
                   const entry = candidate.score_breakdown?.[cat];
                   if (!entry) return null;
                   return (
-                    <div key={cat} className="border border-zinc-200 rounded-md p-2 text-xs">
-                      <p className="font-medium capitalize">
-                        {cat}: {entry.score.toFixed(0)}
-                      </p>
-                      <ul className="list-disc list-inside opacity-80 mt-1">
+                    <div key={cat} className="border border-zinc-200 rounded-md p-2.5 text-xs bg-white">
+                      <div className="flex justify-between items-center mb-1">
+                        <p className="font-semibold capitalize text-zinc-800">{cat}</p>
+                        <span className="font-bold text-zinc-900 bg-zinc-100 px-1.5 py-0.2 rounded">
+                          {entry.score.toFixed(0)}
+                        </span>
+                      </div>
+                      <ul className="list-disc list-inside text-zinc-600 space-y-0.5 mt-1 text-[11px]">
                         {entry.reasons.map((r, i) => (
-                          <li key={i}>{r}</li>
+                          <li key={i} className="leading-tight">{r}</li>
                         ))}
                       </ul>
                     </div>
@@ -187,6 +225,162 @@ export default function CandidateDetailPage() {
           <p className="text-sm text-zinc-500">Not scored.</p>
         )}
       </Section>
+
+      {/* Skill Relevancy Matrix */}
+      {candidate.skills_breakdown && (
+        <Section title="Skill Relevancy & Match Matrix">
+          <div className="space-y-3 text-xs">
+            <div>
+              <p className="font-semibold text-emerald-800 mb-1.5 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                Matched / Relevant Skills ({candidate.skills_breakdown.relevant_skills.length})
+              </p>
+              {candidate.skills_breakdown.relevant_skills.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {candidate.skills_breakdown.relevant_skills.map((skill, idx) => (
+                    <span
+                      key={idx}
+                      className="bg-emerald-50 text-emerald-900 border border-emerald-300 px-2 py-0.5 rounded-full font-medium"
+                    >
+                      ✓ {skill}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-zinc-400 italic">No direct core skill matches found.</p>
+              )}
+            </div>
+
+            <div>
+              <p className="font-semibold text-amber-800 mb-1.5 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                Missing Critical Skills ({candidate.skills_breakdown.missing_critical_skills.length})
+              </p>
+              {candidate.skills_breakdown.missing_critical_skills.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {candidate.skills_breakdown.missing_critical_skills.map((skill, idx) => (
+                    <span
+                      key={idx}
+                      className="bg-amber-50 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full font-medium"
+                    >
+                      ✗ {skill}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-zinc-400 italic">No missing critical skills.</p>
+              )}
+            </div>
+
+            <div>
+              <p className="font-semibold text-zinc-600 mb-1.5 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-zinc-400"></span>
+                Irrelevant / Out-of-Scope Skills ({candidate.skills_breakdown.irrelevant_skills.length})
+              </p>
+              {candidate.skills_breakdown.irrelevant_skills.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {candidate.skills_breakdown.irrelevant_skills.map((skill, idx) => (
+                    <span
+                      key={idx}
+                      className="bg-zinc-100 text-zinc-600 border border-zinc-200 px-2 py-0.5 rounded-full"
+                    >
+                      {skill}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-zinc-400 italic">No irrelevant skills detected.</p>
+              )}
+            </div>
+          </div>
+        </Section>
+      )}
+
+      {/* Profession Screening */}
+      {candidate.profession_fit && (
+        <Section title="Profession & Career Trajectory">
+          <div className="space-y-2 text-xs">
+            <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
+              <span className="text-zinc-500">Role Alignment Verdict:</span>
+              <span
+                className={`font-semibold capitalize px-2 py-0.5 rounded ${
+                  candidate.profession_fit.verdict === "aligned"
+                    ? "bg-emerald-100 text-emerald-900"
+                    : candidate.profession_fit.verdict === "partial"
+                    ? "bg-amber-100 text-amber-900"
+                    : "bg-red-100 text-red-900"
+                }`}
+              >
+                {candidate.profession_fit.verdict}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-zinc-700">
+              <div>
+                <span className="text-zinc-500 block">Seniority Match:</span>
+                <span className="font-medium">{candidate.profession_fit.seniority_match}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500 block">Domain Alignment:</span>
+                <span className="font-medium">{candidate.profession_fit.domain_alignment}</span>
+              </div>
+            </div>
+            {candidate.profession_fit.insights.length > 0 && (
+              <div className="pt-2">
+                <span className="text-zinc-500 block mb-1">Key Trajectory Insights:</span>
+                <ul className="list-disc list-inside text-zinc-700 space-y-0.5">
+                  {candidate.profession_fit.insights.map((insight, i) => (
+                    <li key={i}>{insight}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      {/* Campus Metadata if available */}
+      {candidate.campus_metadata && (
+        <Section title="Campus Interview / College Profile">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs text-zinc-700">
+            {candidate.campus_metadata.college && (
+              <div>
+                <span className="text-zinc-500 block">College:</span>
+                <span className="font-medium">{candidate.campus_metadata.college}</span>
+              </div>
+            )}
+            {candidate.campus_metadata.roll_number && (
+              <div>
+                <span className="text-zinc-500 block">Roll Number:</span>
+                <span className="font-medium">{candidate.campus_metadata.roll_number}</span>
+              </div>
+            )}
+            {candidate.campus_metadata.cgpa !== undefined && (
+              <div>
+                <span className="text-zinc-500 block">CGPA / %:</span>
+                <span className="font-medium">{candidate.campus_metadata.cgpa}</span>
+              </div>
+            )}
+            {candidate.campus_metadata.degree_branch && (
+              <div>
+                <span className="text-zinc-500 block">Branch / Degree:</span>
+                <span className="font-medium">{candidate.campus_metadata.degree_branch}</span>
+              </div>
+            )}
+            {candidate.campus_metadata.graduation_year && (
+              <div>
+                <span className="text-zinc-500 block">Passing Batch:</span>
+                <span className="font-medium">{candidate.campus_metadata.graduation_year}</span>
+              </div>
+            )}
+            {candidate.campus_metadata.standing_backlogs !== undefined && (
+              <div>
+                <span className="text-zinc-500 block">Active Backlogs:</span>
+                <span className="font-medium">{candidate.campus_metadata.standing_backlogs}</span>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
 
       {candidate.knockout_failed && (
         <Section title="Not eligible">
@@ -213,6 +407,13 @@ export default function CandidateDetailPage() {
             <ArchiveForm onSubmit={handleArchive} />
           )}
         </div>
+      </Section>
+
+      <Section title="L1 Phone Call Screening (Recorded Audio)">
+        <L1AudioUploader
+          candidateId={candidate.id}
+          candidateName={candidate.full_name ?? candidate.email ?? "Candidate"}
+        />
       </Section>
 
       {effectiveBucket === "approved" && !candidate.archived && (

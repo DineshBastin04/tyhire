@@ -64,13 +64,13 @@ import io
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
-from app.services.retention import purge_expired_identity_media
+from app.services.retention import purge_expired_identity_media, purge_expired_l1_recordings
 from app.services.audio_extract import extract_audio_wav
 from app.services.facial_analysis import analyze_facial_affect
 from app.services.identity_check import check_identity_match
 from app.services.qa_verification import analyze_qa
 from app.services.transcript_merge import merge_transcripts
-from app.services.transcription import transcribe_with_segments
+from app.services.transcription import transcribe_short_clip, transcribe_with_segments
 from app.services.video_extract import extract_frames
 from app.services.voice_tone import analyze_voice_tone
 from app.services.livekit_service import generate_livekit_token
@@ -272,12 +272,13 @@ def get_interviewer_recording(session_id: uuid.UUID, request: Request, db: Sessi
 
 @router.post("/cleanup-expired-media", dependencies=[Depends(require_hr_auth)])
 def cleanup_expired_media(db: Session = Depends(get_db)):
-    """Manually clears raw ID/selfie image files past the retention window, keeping the
-    verdict/confidence for audit purposes — not the images themselves. Retention is also
+    """Manually clears raw ID/selfie image files and L1 phone recordings past the retention window,
+    keeping verdicts, confidence, transcripts, and evaluation notes for audit purposes. Retention is also
     enforced automatically by the in-process daily sweep (see app.main) and can be driven by
     external cron (python -m app.jobs.run_retention_sweep); all three share the same logic."""
-    cleared = purge_expired_identity_media(db)
-    return {"identity_checks_cleaned": cleared}
+    cleared_id = purge_expired_identity_media(db)
+    cleared_l1 = purge_expired_l1_recordings(db)
+    return {"identity_checks_cleaned": cleared_id, "l1_recordings_cleaned": cleared_l1}
 
 
 @router.get(
@@ -824,6 +825,61 @@ def live_sentiment(
     )
 
 
+@router.post("/{session_id}/live-transcript-chunk")
+async def upload_live_transcript_chunk(
+    background_tasks: BackgroundTasks,
+    clip: UploadFile,
+    session_offset_ms: int = Form(...),
+    session: InterviewSession = Depends(require_session_token),
+):
+    """Candidate-side browser-agnostic live transcript: a short, independent clip (a few
+    seconds, same "fully-closed clip" shape as sentiment-sample, not a slice of the
+    continuously-appended recording) transcribed server-side and appended to the live feed.
+    Replaces relying on the browser's own SpeechRecognition API, which only exists in
+    Chromium browsers and is known to silently drop results even there — this works
+    identically on every browser since it only needs MediaRecorder + fetch."""
+    content = await clip.read()
+    relative_path = storage.save_file(f"interviews/{session.id}/live-transcript", "chunk.webm", content)
+    background_tasks.add_task(
+        _process_live_transcript_chunk, str(session.id), "candidate", relative_path, session_offset_ms
+    )
+    return {"accepted": True}
+
+
+@router.post("/{session_id}/interviewer-live-transcript-chunk")
+async def upload_interviewer_live_transcript_chunk(
+    background_tasks: BackgroundTasks,
+    clip: UploadFile,
+    session_offset_ms: int = Form(...),
+    session: InterviewSession = Depends(require_interviewer_token),
+):
+    """Interviewer-side counterpart of live-transcript-chunk above."""
+    content = await clip.read()
+    relative_path = storage.save_file(f"interviews/{session.id}/live-transcript", "chunk.webm", content)
+    background_tasks.add_task(
+        _process_live_transcript_chunk, str(session.id), "interviewer", relative_path, session_offset_ms
+    )
+    return {"accepted": True}
+
+
+def _process_live_transcript_chunk(sid: str, speaker: str, relative_path: str, offset_ms: int) -> None:
+    """Transcribes one live-transcript clip and appends it to the buffer if it actually
+    contains speech, then always deletes the clip itself — unlike sentiment-sample clips
+    (kept for facial/voice analysis), only this clip's text has any lasting value, and these
+    arrive every few seconds for the whole call, so leaving them on disk isn't free."""
+    try:
+        with storage.decrypted_temp_copy(relative_path) as path:
+            text = transcribe_short_clip(path)
+        if text:
+            _append_live_transcript_item(sid, speaker, text, offset_ms)
+    except Exception:  # noqa: BLE001 - best-effort; a missed chunk just doesn't appear live,
+        # same as a dropped browser SpeechRecognition result would have.
+        logger.exception("Live transcript chunk transcription failed for session %s", sid)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(storage.absolute_path(relative_path))
+
+
 # --- Post-interview processing (background) ---------------------------------------------
 
 
@@ -1086,6 +1142,25 @@ def complete_session(
     return session
 
 
+def _append_live_transcript_item(sid: str, speaker: str, text: str, offset_ms: int) -> dict:
+    """Shared by the manual-entry endpoint below and the chunked-transcription background
+    task further down — one place owns the in-memory buffer's shape and trim policy."""
+    if sid not in _live_transcripts:
+        _live_transcripts[sid] = []
+
+    item = {
+        "id": f"{uuid.uuid4().hex[:8]}",
+        "speaker": speaker,
+        "text": text.strip(),
+        "offset_ms": offset_ms,
+        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+    }
+    _live_transcripts[sid].append(item)
+    if len(_live_transcripts[sid]) > 250:
+        _live_transcripts[sid] = _live_transcripts[sid][-250:]
+    return item
+
+
 @router.post("/{session_id}/live-transcript")
 def push_live_transcript(
     session_id: uuid.UUID,
@@ -1093,21 +1168,7 @@ def push_live_transcript(
     db: Session = Depends(get_db),
 ):
     """Buffers live streaming speech utterances in real time for interviewer display."""
-    sid = str(session_id)
-    if sid not in _live_transcripts:
-        _live_transcripts[sid] = []
-
-    item = {
-        "id": f"{uuid.uuid4().hex[:8]}",
-        "speaker": payload.speaker,
-        "text": payload.text.strip(),
-        "offset_ms": payload.offset_ms,
-        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-    }
-    _live_transcripts[sid].append(item)
-    if len(_live_transcripts[sid]) > 250:
-        _live_transcripts[sid] = _live_transcripts[sid][-250:]
-
+    item = _append_live_transcript_item(str(session_id), payload.speaker, payload.text, payload.offset_ms)
     return {"status": "ok", "item": item}
 
 

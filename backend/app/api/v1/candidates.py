@@ -1,7 +1,7 @@
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, joinedload
 
@@ -134,10 +134,22 @@ async def upload_resumes(
             if failed:
                 candidate.bucket = "declined"
             else:
-                score, score_reasons, breakdown = scoring.score_candidate(profile, job)
+                (
+                    score,
+                    tech_score,
+                    comm_score,
+                    score_reasons,
+                    breakdown,
+                    skills_breakdown,
+                    profession_fit,
+                ) = scoring.score_candidate(profile, job)
                 candidate.fit_score = score
+                candidate.technical_score = tech_score
+                candidate.communication_score = comm_score
                 candidate.score_reasons = score_reasons
                 candidate.score_breakdown = breakdown
+                candidate.skills_breakdown = skills_breakdown
+                candidate.profession_fit = profession_fit
                 _apply_bucket_from_score(candidate, job)
 
         except Exception as exc:  # noqa: BLE001 - surfaced to HR in the "Needs attention" panel, not dropped
@@ -205,10 +217,22 @@ def set_screening_details(
     elif candidate.fit_score is None and candidate.parsed_profile:
         # Never scored because knockout blocked it at upload time — score it now that the
         # thing that blocked it has cleared.
-        score, score_reasons, breakdown = scoring.score_candidate(candidate.parsed_profile, job)
+        (
+            score,
+            tech_score,
+            comm_score,
+            score_reasons,
+            breakdown,
+            skills_breakdown,
+            profession_fit,
+        ) = scoring.score_candidate(candidate.parsed_profile, job)
         candidate.fit_score = score
+        candidate.technical_score = tech_score
+        candidate.communication_score = comm_score
         candidate.score_reasons = score_reasons
         candidate.score_breakdown = breakdown
+        candidate.skills_breakdown = skills_breakdown
+        candidate.profession_fit = profession_fit
         _apply_bucket_from_score(candidate, job)
     elif candidate.fit_score is not None:
         _apply_bucket_from_score(candidate, job)
@@ -471,3 +495,203 @@ def unarchive_candidate(
     db.commit()
     db.refresh(candidate)
     return candidate
+
+
+@router.post("/jobs/{job_id}/campus-bulk-zip")
+async def upload_campus_bulk_zip(
+    job_id: uuid.UUID,
+    file: UploadFile,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_hr_user: dict = Depends(require_hr_auth),
+):
+    """Bulk uploads a ZIP archive containing candidate resumes for campus interview drives."""
+    from app.models.bulk_batch import BulkUploadBatch
+    from app.services.campus_screening import extract_zip_resumes, run_campus_bulk_processing_task
+
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded ZIP file is empty.")
+
+    try:
+        extracted = extract_zip_resumes(content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to extract ZIP archive: {exc}")
+
+    if not extracted:
+        raise HTTPException(status_code=400, detail="No valid PDF or DOCX resumes found in ZIP archive.")
+
+    items = [{"filename": fn, "content": b, "campus_metadata": None} for fn, b in extracted]
+
+    batch = BulkUploadBatch(
+        job_id=job_id,
+        batch_type="zip",
+        status="pending",
+        total_count=len(items),
+        processed_count=0,
+        failed_count=0,
+        error_log=[],
+        uploaded_by_user_id=current_hr_user["user_id"],
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+
+    background_tasks.add_task(
+        run_campus_bulk_processing_task,
+        batch_id=batch.id,
+        job_id=job_id,
+        items=items,
+        uploader_user_id=current_hr_user["user_id"],
+    )
+
+    return {
+        "batch_id": batch.id,
+        "total_count": len(items),
+        "status": "pending",
+        "message": f"Queued {len(items)} resumes for background campus screening.",
+    }
+
+
+@router.post("/jobs/{job_id}/campus-csv-import")
+async def import_campus_csv_roster(
+    job_id: uuid.UUID,
+    csv_file: UploadFile,
+    resumes_zip: UploadFile,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_hr_user: dict = Depends(require_hr_auth),
+):
+    """Imports a college placement CSV roster along with matching resume files in a ZIP archive."""
+    from app.models.bulk_batch import BulkUploadBatch
+    from app.services.campus_screening import (
+        extract_zip_resumes,
+        parse_campus_csv_roster,
+        run_campus_bulk_processing_task,
+    )
+
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    csv_bytes = await csv_file.read()
+    zip_bytes = await resumes_zip.read()
+
+    try:
+        csv_text = csv_bytes.decode("utf-8-sig", errors="replace")
+        roster_rows = parse_campus_csv_roster(csv_text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV roster: {exc}")
+
+    if not roster_rows:
+        raise HTTPException(status_code=400, detail="CSV roster contains no data rows.")
+
+    try:
+        extracted = extract_zip_resumes(zip_bytes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to extract ZIP archive: {exc}")
+
+    # Build filename lookup map
+    zip_map: dict[str, tuple[str, bytes]] = {}
+    for fn, b in extracted:
+        zip_map[fn.lower()] = (fn, b)
+        # Also map without extension
+        base = os.path.splitext(fn)[0].lower()
+        zip_map[base] = (fn, b)
+
+    items: list[dict[str, Any]] = []
+    failed_initial = 0
+    error_logs: list[dict[str, Any]] = []
+
+    for idx, row in enumerate(roster_rows, 1):
+        target_fn = (row.get("resume_filename") or "").lower()
+        target_roll = (row.get("roll_number") or "").lower()
+        target_name = (row.get("name") or "").lower().replace(" ", "_")
+
+        matched = (
+            zip_map.get(target_fn)
+            or zip_map.get(f"{target_fn}.pdf")
+            or zip_map.get(f"{target_fn}.docx")
+            or (zip_map.get(target_roll) if target_roll else None)
+            or (zip_map.get(f"{target_roll}.pdf") if target_roll else None)
+            or (zip_map.get(target_name) if target_name else None)
+        )
+
+        if not matched:
+            failed_initial += 1
+            error_logs.append({
+                "row": idx,
+                "identifier": row.get("roll_number") or row.get("name") or f"Row {idx}",
+                "error": f"Resume file '{row.get('resume_filename') or row.get('roll_number')}' not found in ZIP archive.",
+            })
+            continue
+
+        real_fn, file_bytes = matched
+        items.append({
+            "filename": real_fn,
+            "content": file_bytes,
+            "campus_metadata": row,
+        })
+
+    batch = BulkUploadBatch(
+        job_id=job_id,
+        batch_type="csv",
+        status="pending",
+        total_count=len(roster_rows),
+        processed_count=0,
+        failed_count=failed_initial,
+        error_log=error_logs,
+        uploaded_by_user_id=current_hr_user["user_id"],
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+
+    if items:
+        background_tasks.add_task(
+            run_campus_bulk_processing_task,
+            batch_id=batch.id,
+            job_id=job_id,
+            items=items,
+            uploader_user_id=current_hr_user["user_id"],
+        )
+
+    return {
+        "batch_id": batch.id,
+        "total_count": len(roster_rows),
+        "matched_count": len(items),
+        "unmatched_count": failed_initial,
+        "status": "pending",
+        "message": f"Queued {len(items)} matched resumes for campus screening ({failed_initial} unmatched).",
+    }
+
+
+@router.get("/jobs/{job_id}/bulk-batches/{batch_id}")
+def get_bulk_batch_status(
+    job_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    from app.models.bulk_batch import BulkUploadBatch
+
+    batch = db.get(BulkUploadBatch, batch_id)
+    if not batch or batch.job_id != job_id:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    return {
+        "id": batch.id,
+        "job_id": batch.job_id,
+        "batch_type": batch.batch_type,
+        "status": batch.status,
+        "total_count": batch.total_count,
+        "processed_count": batch.processed_count,
+        "failed_count": batch.failed_count,
+        "error_log": batch.error_log or [],
+        "created_at": batch.created_at,
+        "completed_at": batch.completed_at,
+    }
+

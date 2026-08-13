@@ -28,6 +28,15 @@ export interface Job {
   weight_experience: number;
   weight_education: number;
   weight_certifications: number;
+  weight_communication: number;
+  core_skills?: string[];
+  secondary_skills?: string[];
+  irrelevant_skills?: string[];
+  is_campus_drive?: boolean;
+  campus_min_cgpa?: number | null;
+  campus_allowed_batches?: number[];
+  campus_allowed_branches?: string[];
+  campus_max_backlogs?: number | null;
   require_desktop_probe: boolean;
   archived: boolean;
   archived_reason: string | null;
@@ -43,6 +52,30 @@ export interface ScoreBreakdown {
   experience: ScoreCategory;
   education: ScoreCategory;
   certifications: ScoreCategory;
+  communication?: ScoreCategory;
+}
+
+export interface SkillsBreakdown {
+  relevant_skills: string[];
+  missing_critical_skills: string[];
+  irrelevant_skills: string[];
+}
+
+export interface ProfessionFit {
+  seniority_match: string;
+  domain_alignment: string;
+  career_trajectory_score: number;
+  verdict: "aligned" | "partial" | "misaligned";
+  insights: string[];
+}
+
+export interface CampusMetadata {
+  roll_number?: string;
+  cgpa?: number;
+  graduation_year?: number;
+  degree_branch?: string;
+  standing_backlogs?: number;
+  college?: string;
 }
 
 export interface Candidate {
@@ -61,8 +94,13 @@ export interface Candidate {
   processing_failed: boolean;
   processing_error: string | null;
   fit_score: number | null;
+  technical_score: number | null;
+  communication_score: number | null;
   score_reasons: string[];
   score_breakdown: ScoreBreakdown | null;
+  skills_breakdown: SkillsBreakdown | null;
+  profession_fit: ProfessionFit | null;
+  campus_metadata: CampusMetadata | null;
   manual_score_adjustment: number | null;
   manual_adjustment_reason: string | null;
   bucket: Bucket | null;
@@ -199,4 +237,47 @@ export interface IntegrityFlag {
   reviewed: boolean;
   reviewer_decision: string | null;
   reviewer_note: string | null;
+}
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface L1PhoneScreening {
+  id: string;
+  candidate_id: string;
+  job_id: string | null;
+  audio_file_path: string | null;
+  audio_duration_seconds: number | null;
+  is_stereo_split: boolean;
+  transcript: string | null;
+  transcript_segments: TranscriptSegment[];
+  technical_score: number | null;
+  communication_score: number | null;
+  overall_l1_score: number | null;
+  verdict: "recommend_l2" | "hold" | "decline" | "senior_review";
+  call_summary: string | null;
+  extracted_details: Record<string, string>;
+  strengths: string[];
+  red_flags: string[];
+  next_steps: string[];
+  voice_tone_notes: Record<string, string>;
+  uploaded_by_user_id: string | null;
+  uploaded_by_email?: string | null;
+  created_at: string;
+}
+
+export interface BulkUploadBatch {
+  id: string;
+  job_id: string;
+  batch_type: "zip" | "csv";
+  status: "pending" | "processing" | "completed" | "failed";
+  total_count: number;
+  processed_count: number;
+  failed_count: number;
+  error_log: Array<{ row?: number; identifier?: string; error: string }>;
+  created_at: string;
+  completed_at: string | null;
 }

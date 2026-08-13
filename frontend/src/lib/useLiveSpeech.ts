@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { postJson } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { postForm } from "@/lib/api";
 
 export interface LiveTranscriptItem {
   id: string;
@@ -12,38 +12,27 @@ export interface LiveTranscriptItem {
   isInterim?: boolean;
 }
 
-// Browser Web Speech API type declaration
-interface SpeechRecognitionEventLike extends Event {
-  resultIndex: number;
-  results: {
-    length: number;
-    [index: number]: {
-      isFinal: boolean;
-      [index: number]: {
-        transcript: string;
-        confidence: number;
-      };
-    };
-  };
-}
+// A few seconds is the sweet spot: long enough that most single utterances land in one
+// chunk (fewer split-across-chunks transcripts), short enough that "live" still feels live.
+const CHUNK_DURATION_MS = 6000;
+// Brief pause between stopping one recorder and starting the next — gives the browser a
+// tick to actually flush the previous MediaRecorder before reusing the same audio track.
+const RESTART_DELAY_MS = 300;
 
-interface SpeechRecognitionLike extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: Event) => void) | null;
-  onend: (() => void) | null;
-}
-
-interface WindowWithSpeech extends Window {
-  SpeechRecognition?: { new (): SpeechRecognitionLike };
-  webkitSpeechRecognition?: { new (): SpeechRecognitionLike };
-}
-
+/**
+ * Records short, independent audio chunks and uploads each to the backend for server-side
+ * transcription (see live-transcript-chunk / interviewer-live-transcript-chunk in
+ * interviews.py) — a browser-agnostic replacement for the browser's own SpeechRecognition
+ * API, which only ever existed in Chromium browsers and was known to silently stop or drop
+ * results even there. Trades true word-by-word captions for a few seconds of latency
+ * (chunk length + upload + transcription) in exchange for working identically everywhere
+ * MediaRecorder does — which is every modern browser.
+ *
+ * Requests its own microphone stream independently of whatever else on the page is already
+ * capturing audio (the main interview recording, WebRTC) — getUserMedia supports multiple
+ * concurrent captures from the same device fine, and keeping this self-contained means it
+ * doesn't need to know about or share state with those other, unrelated capture paths.
+ */
 export function useLiveSpeech({
   sessionId,
   speaker,
@@ -60,103 +49,83 @@ export function useLiveSpeech({
   tokenHeaderKey?: string;
 }) {
   const [liveItems, setLiveItems] = useState<LiveTranscriptItem[]>([]);
-  const [currentInterim, setCurrentInterim] = useState<string>("");
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   useEffect(() => {
-    if (!enabled || typeof window === "undefined") return;
+    if (!enabled || !sessionId) return;
 
-    const win = window as unknown as WindowWithSpeech;
-    const SpeechConstructor = win.SpeechRecognition || win.webkitSpeechRecognition;
+    let cancelled = false;
+    let stream: MediaStream | null = null;
+    let recorder: MediaRecorder | null = null;
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    let restartTimer: ReturnType<typeof setTimeout> | undefined;
 
-    if (!SpeechConstructor) {
-      console.warn("Web Speech API not supported in this browser.");
-      return;
+    const endpoint =
+      speaker === "interviewer"
+        ? `/interviews/${sessionId}/interviewer-live-transcript-chunk`
+        : `/interviews/${sessionId}/live-transcript-chunk`;
+    const headers = authToken && tokenHeaderKey ? { [tokenHeaderKey]: authToken } : undefined;
+
+    function uploadChunk(blob: Blob, offsetMs: number) {
+      if (blob.size === 0) return;
+      const form = new FormData();
+      form.append("clip", blob, "chunk.webm");
+      form.append("session_offset_ms", String(offsetMs));
+      // Best-effort — a dropped chunk just doesn't appear live, same as a missed browser
+      // SpeechRecognition result would have. The final post-call transcript (from the main
+      // recording) is unaffected either way.
+      postForm(endpoint, form, headers).catch(() => {});
     }
 
-    let isRunning = true;
-    let recognition: SpeechRecognitionLike;
+    function recordOneChunk() {
+      if (cancelled || !stream) return;
+      const chunkOffsetMs = startedAtMs ? Date.now() - startedAtMs : 0;
+      const chunks: Blob[] = [];
 
-    try {
-      recognition = new SpeechConstructor();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = "en-US";
-      recognitionRef.current = recognition;
-    } catch (e) {
-      console.warn("Failed to initialize speech recognition", e);
-      return;
+      try {
+        recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      } catch {
+        return;
+      }
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        setIsCapturing(false);
+        uploadChunk(new Blob(chunks, { type: "audio/webm" }), chunkOffsetMs);
+        if (!cancelled) restartTimer = setTimeout(recordOneChunk, RESTART_DELAY_MS);
+      };
+      recorder.start();
+      setIsCapturing(true);
+      stopTimer = setTimeout(() => {
+        if (recorder && recorder.state !== "inactive") recorder.stop();
+      }, CHUNK_DURATION_MS);
     }
 
-    recognition.onresult = (event: SpeechRecognitionEventLike) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        const text = result[0]?.transcript?.trim();
-        if (!text) continue;
-
-        if (result.isFinal) {
-          const offsetMs = startedAtMs ? Date.now() - startedAtMs : 0;
-          const newItem: LiveTranscriptItem = {
-            id: `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            speaker,
-            text,
-            offsetMs,
-            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-            isFinal: true,
-          } as LiveTranscriptItem;
-
-          setLiveItems((prev) => [...prev, newItem]);
-          setCurrentInterim("");
-
-          // Post to backend live-transcript buffer
-          if (sessionId) {
-            const headers = authToken && tokenHeaderKey ? { [tokenHeaderKey]: authToken } : undefined;
-            postJson(`/interviews/${sessionId}/live-transcript`, {
-              speaker,
-              text,
-              offset_ms: offsetMs,
-            }, headers).catch(() => {});
-          }
-        } else {
-          interim += text + " ";
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then((s) => {
+        if (cancelled) {
+          s.getTracks().forEach((t) => t.stop());
+          return;
         }
-      }
-      setCurrentInterim(interim.trim());
-    };
-
-    recognition.onerror = () => {
-      // Speech recognition encountered error or silence; onend will restart if isRunning
-    };
-
-    recognition.onend = () => {
-      if (isRunning) {
-        try {
-          recognition.start();
-        } catch {
-          // Restart after short tick
-          setTimeout(() => {
-            if (isRunning) {
-              try {
-                recognition.start();
-              } catch {}
-            }
-          }, 300);
-        }
-      }
-    };
-
-    try {
-      recognition.start();
-    } catch {}
+        stream = s;
+        recordOneChunk();
+      })
+      .catch(() => {
+        // No mic access for this capture — the live transcript for this speaker just won't
+        // populate. Every other feature (main recording, signals) requests its own mic
+        // access separately and isn't affected by this failing.
+      });
 
     return () => {
-      isRunning = false;
-      try {
-        recognition.stop();
-      } catch {}
+      cancelled = true;
+      clearTimeout(stopTimer);
+      clearTimeout(restartTimer);
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+      stream?.getTracks().forEach((t) => t.stop());
     };
   }, [enabled, sessionId, speaker, startedAtMs, authToken, tokenHeaderKey]);
 
-  return { liveItems, currentInterim, setLiveItems };
+  return { liveItems, isCapturing, setLiveItems };
 }

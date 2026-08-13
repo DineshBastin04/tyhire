@@ -22,10 +22,21 @@ class JobCreate(BaseModel):
     approve_threshold: int = 75
     decline_threshold: int = 40
 
-    weight_skills: float = 0.25
-    weight_experience: float = 0.25
-    weight_education: float = 0.25
-    weight_certifications: float = 0.25
+    weight_skills: float = 0.20
+    weight_experience: float = 0.20
+    weight_education: float = 0.20
+    weight_certifications: float = 0.20
+    weight_communication: float = 0.20
+
+    core_skills: list[str] = []
+    secondary_skills: list[str] = []
+    irrelevant_skills: list[str] = []
+
+    is_campus_drive: bool = False
+    campus_min_cgpa: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    campus_allowed_batches: list[int] = []
+    campus_allowed_branches: list[str] = []
+    campus_max_backlogs: Optional[int] = Field(default=None, ge=0)
 
     require_desktop_probe: bool = False
 
@@ -49,9 +60,15 @@ class JobCreate(BaseModel):
 
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> "JobCreate":
-        total = self.weight_skills + self.weight_experience + self.weight_education + self.weight_certifications
+        total = (
+            self.weight_skills
+            + self.weight_experience
+            + self.weight_education
+            + self.weight_certifications
+            + self.weight_communication
+        )
         if abs(total - 1.0) > 0.01:
-            raise ValueError(f"Sub-score weights must sum to 1.0 (got {total})")
+            raise ValueError(f"Sub-score weights must sum to 1.0 (got {total:.2f})")
         return self
 
     @model_validator(mode="after")
@@ -93,6 +110,17 @@ class JobUpdate(BaseModel):
     weight_experience: Optional[float] = None
     weight_education: Optional[float] = None
     weight_certifications: Optional[float] = None
+    weight_communication: Optional[float] = None
+
+    core_skills: Optional[list[str]] = None
+    secondary_skills: Optional[list[str]] = None
+    irrelevant_skills: Optional[list[str]] = None
+
+    is_campus_drive: Optional[bool] = None
+    campus_min_cgpa: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    campus_allowed_batches: Optional[list[int]] = None
+    campus_allowed_branches: Optional[list[str]] = None
+    campus_max_backlogs: Optional[int] = Field(default=None, ge=0)
 
     require_desktop_probe: Optional[bool] = None
 

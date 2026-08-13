@@ -54,3 +54,34 @@ def purge_expired_identity_media(db: Session) -> int:
     if cleared:
         logger.info("retention: cleared media for %d identity check(s)", cleared)
     return cleared
+
+
+def purge_expired_l1_recordings(db: Session) -> int:
+    """Deletes raw audio recording files for L1 phone screenings past the retention window,
+    keeping transcripts, scores, and evaluation takeaways. Returns the number of recordings cleared."""
+    from app.models.l1_screening import L1PhoneScreening
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.identity_media_retention_days)
+    expired = (
+        db.query(L1PhoneScreening)
+        .filter(L1PhoneScreening.created_at < cutoff, L1PhoneScreening.audio_file_path.isnot(None))
+        .all()
+    )
+
+    cleared = 0
+    for screening in expired:
+        path = screening.audio_file_path
+        if path:
+            try:
+                os.remove(storage.absolute_path(path))
+            except OSError:
+                pass
+        screening.audio_file_path = None
+        db.add(screening)
+        cleared += 1
+
+    db.commit()
+    if cleared:
+        logger.info("retention: cleared audio for %d L1 screening(s)", cleared)
+    return cleared
+
