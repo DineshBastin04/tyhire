@@ -9,7 +9,8 @@ from app.db.session import Base
 
 
 class L1Verdict(str, enum.Enum):
-    recommend_l2 = "recommend_l2"
+    recommend_l1 = "recommend_l1"
+    recommend_l2 = "recommend_l1"  # backwards-compatible alias
     hold = "hold"
     decline = "decline"
     senior_review = "senior_review"
@@ -39,7 +40,7 @@ class L1PhoneScreening(Base):
     overall_l1_score = Column(Float, nullable=True)
 
     # AI evaluation output
-    verdict = Column(String, nullable=False, default="recommend_l2")
+    verdict = Column(String, nullable=False, default="recommend_l1")
     call_summary = Column(Text, nullable=True)
     extracted_details = Column(JSON, default=dict)  # notice_period, salary, location, etc.
     strengths = Column(JSON, default=list)

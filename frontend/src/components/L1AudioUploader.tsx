@@ -11,8 +11,14 @@ interface L1AudioUploaderProps {
 }
 
 const VERDICT_STYLES: Record<string, { label: string; bg: string; text: string; border: string }> = {
+  recommend_l1: {
+    label: "Recommend L1 Technical",
+    bg: "bg-emerald-50",
+    text: "text-emerald-800",
+    border: "border-emerald-300",
+  },
   recommend_l2: {
-    label: "Recommend L2 Technical",
+    label: "Recommend L1 Technical",
     bg: "bg-emerald-50",
     text: "text-emerald-800",
     border: "border-emerald-300",
@@ -116,11 +122,11 @@ export default function L1AudioUploader({
           </div>
           <div>
             <p className="text-sm font-medium text-zinc-900">
-              Upload L1 Phone Screening Recording
+              Upload HR Phone Screening Recording
             </p>
             <p className="text-xs text-zinc-500">
-              Upload HR phone call audio (.mp3, .wav, .m4a, .webm). AI will automatically
-              transcribe, evaluate technical & verbal communication scores, and generate next steps.
+              Upload initial HR phone screening audio (.mp3, .wav, .m4a, .webm). AI will automatically
+              transcribe, evaluate basic communication & background, and generate recommended focus areas for the L1 Technical Interview.
             </p>
           </div>
           <button
@@ -213,7 +219,7 @@ export default function L1AudioUploader({
           {/* Scores Breakdown */}
           <div className="grid grid-cols-3 gap-3">
             <div className="border border-zinc-200 bg-zinc-50/70 rounded-md p-2.5 text-center">
-              <p className="text-[11px] text-zinc-500 font-medium">L1 Overall Fit</p>
+              <p className="text-[11px] text-zinc-500 font-medium">HR Screening Fit</p>
               <p className="text-xl font-bold text-zinc-900 mt-0.5">
                 {activeScreening.overall_l1_score !== null
                   ? `${activeScreening.overall_l1_score.toFixed(0)}/100`
@@ -324,7 +330,7 @@ export default function L1AudioUploader({
           {activeScreening.next_steps && activeScreening.next_steps.length > 0 && (
             <div className="border border-blue-200 bg-blue-50/40 p-3 rounded-md text-xs">
               <h4 className="font-semibold text-blue-950 mb-1.5 flex items-center gap-1">
-                🎯 Next Step Action Plan for {candidateName}
+                🎯 Next Steps for L1 Technical Interviewer ({candidateName})
               </h4>
               <ul className="space-y-1 text-blue-900">
                 {activeScreening.next_steps.map((step, idx) => (

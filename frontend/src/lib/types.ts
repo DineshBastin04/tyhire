@@ -257,7 +257,7 @@ export interface L1PhoneScreening {
   technical_score: number | null;
   communication_score: number | null;
   overall_l1_score: number | null;
-  verdict: "recommend_l2" | "hold" | "decline" | "senior_review";
+  verdict: "recommend_l1" | "recommend_l2" | "hold" | "decline" | "senior_review";
   call_summary: string | null;
   extracted_details: Record<string, string>;
   strengths: string[];

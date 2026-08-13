@@ -409,7 +409,7 @@ export default function CandidateDetailPage() {
         </div>
       </Section>
 
-      <Section title="L1 Phone Call Screening (Recorded Audio)">
+      <Section title="HR Phone Screening Call (Recorded Audio)">
         <L1AudioUploader
           candidateId={candidate.id}
           candidateName={candidate.full_name ?? candidate.email ?? "Candidate"}

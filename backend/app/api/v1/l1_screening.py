@@ -71,7 +71,7 @@ async def upload_l1_audio(
         technical_score=analysis.get("technical_score"),
         communication_score=analysis.get("communication_score"),
         overall_l1_score=analysis.get("overall_l1_score"),
-        verdict=analysis.get("verdict", "recommend_l2"),
+        verdict=analysis.get("verdict", "recommend_l1"),
         call_summary=analysis.get("call_summary"),
         extracted_details=analysis.get("extracted_details", {}),
         strengths=analysis.get("strengths", []),

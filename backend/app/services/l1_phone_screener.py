@@ -16,15 +16,15 @@ L1_EVAL_TOOL = {
     "function": {
         "name": "evaluate_l1_phone_screening",
         "description": (
-            "Evaluates an HR initial phone screening call across technical competence, "
-            "verbal communication fluency, candidate logistics, and recommends actionable next steps."
+            "Evaluates an initial HR basic phone screening call across candidate communication fluency, "
+            "logistics, basic background, and recommends whether to progress to the L1 Technical Interview."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "technical_score": {
                     "type": "number",
-                    "description": "0-100 score on candidate's technical clarity and domain knowledge during the call.",
+                    "description": "0-100 score on candidate's basic technical clarity and domain knowledge during the HR screening call.",
                 },
                 "communication_score": {
                     "type": "number",
@@ -32,12 +32,12 @@ L1_EVAL_TOOL = {
                 },
                 "overall_l1_score": {
                     "type": "number",
-                    "description": "0-100 overall L1 phone screening score.",
+                    "description": "0-100 overall HR screening score.",
                 },
                 "verdict": {
                     "type": "string",
-                    "enum": ["recommend_l2", "hold", "decline", "senior_review"],
-                    "description": "Clear hiring recommendation verdict for HR.",
+                    "enum": ["recommend_l1", "hold", "decline", "senior_review"],
+                    "description": "Clear hiring recommendation verdict for HR (e.g. recommend_l1 for proceeding to L1 Technical Interview).",
                 },
                 "call_summary": {
                     "type": "string",
@@ -59,7 +59,7 @@ L1_EVAL_TOOL = {
                 "strengths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Key strengths and positive observations from the screening call.",
+                    "description": "Key strengths and positive observations from the HR screening call.",
                 },
                 "red_flags": {
                     "type": "array",
@@ -69,7 +69,7 @@ L1_EVAL_TOOL = {
                 "next_steps": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Specific actionable next steps and technical topics for the L2 technical interviewer to probe deeply.",
+                    "description": "Specific actionable next steps and technical topics for the L1 Technical Interviewer to probe deeply.",
                 },
             },
             "required": [
@@ -87,14 +87,14 @@ L1_EVAL_TOOL = {
     },
 }
 
-SYSTEM_PROMPT = """You are an expert HR screening analyst evaluating an L1 phone screening call for recruitment.
+SYSTEM_PROMPT = """You are an expert HR screening analyst evaluating an initial HR basic phone screening call for recruitment.
 Analyze the transcript of the call between the HR interviewer and the job candidate.
 Evaluate:
 1. Technical Competence (0-100): Core tech domain knowledge, clarity in explaining past projects, practical understanding.
 2. Verbal Communication & Fluency (0-100): Professional demeanor, spoken English/language fluency, concise articulation, tone, and listening ability.
 3. Logistics & Screening Facts: Notice period, salary expectations, current location, willingness to relocate, and career motivations.
 4. Strengths & Red Flags: Concrete observations (e.g. inconsistent tenure, strong passion, clear communication).
-5. Actionable Next Steps: A clear hiring decision (Recommend L2 / Hold / Decline / Senior Review) and specific drill-down areas for the technical interview.
+5. Actionable Next Steps: A clear hiring decision (Recommend L1 Technical Interview / Hold / Decline / Senior Review) and specific drill-down areas for the L1 Technical Interviewer (the upcoming first technical round).
 """
 
 
@@ -217,8 +217,8 @@ Please evaluate the candidate's technical competence, verbal communication quali
             "technical_score": 65.0,
             "communication_score": 70.0 if word_count > 50 else 50.0,
             "overall_l1_score": 68.0,
-            "verdict": "recommend_l2" if word_count > 60 else "senior_review",
-            "call_summary": f"Initial phone screening recorded for {candidate_name}. Candidate participated in discussion with {word_count} spoken words captured.",
+            "verdict": "recommend_l1" if word_count > 60 else "senior_review",
+            "call_summary": f"Initial HR phone screening recorded for {candidate_name}. Candidate participated in discussion with {word_count} spoken words captured.",
             "extracted_details": {
                 "notice_period_discussed": "Mentioned during call",
                 "current_ctc_discussed": "Discussed",
@@ -226,10 +226,13 @@ Please evaluate the candidate's technical competence, verbal communication quali
                 "current_location": "Provided",
                 "relocation_willingness": "Yes",
             },
-            "strengths": ["Candidate was responsive and engaged during initial phone screening."],
+            "strengths": ["Candidate was responsive and engaged during initial HR phone screening."],
             "red_flags": [],
-            "next_steps": ["Conduct L2 technical interview to deep-dive into specific project contributions."],
+            "next_steps": ["Conduct L1 technical interview to deep-dive into specific project contributions."],
         }
+
+    raw_verdict = eval_result.get("verdict", "recommend_l1")
+    verdict = "recommend_l1" if raw_verdict in ("recommend_l1", "recommend_l2") else raw_verdict
 
     return {
         "audio_duration_seconds": duration_seconds,
@@ -239,7 +242,7 @@ Please evaluate the candidate's technical competence, verbal communication quali
         "technical_score": eval_result.get("technical_score", 70.0),
         "communication_score": eval_result.get("communication_score", 70.0),
         "overall_l1_score": eval_result.get("overall_l1_score", 70.0),
-        "verdict": eval_result.get("verdict", "recommend_l2"),
+        "verdict": verdict,
         "call_summary": eval_result.get("call_summary", ""),
         "extracted_details": eval_result.get("extracted_details", {}),
         "strengths": eval_result.get("strengths", []),
@@ -247,3 +250,4 @@ Please evaluate the candidate's technical competence, verbal communication quali
         "next_steps": eval_result.get("next_steps", []),
         "voice_tone_notes": voice_tone_result,
     }
+
