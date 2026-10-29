@@ -343,14 +343,25 @@ export default function InterviewerCapturePage() {
   }
 
   function endCall(notifyPeer = true) {
+    // Told first, while the connection is still up — the message can't be delivered once
+    // the tracks and socket below are gone.
     if (notifyPeer) {
       webrtcApiRef.current?.notifyPeerEnded();
     }
+
+    // Two independent captures have to be released, and both are released here rather
+    // than left to component teardown: unmounting WebRTCRoom also stops its devices, but
+    // only on a later render, so the camera light lingered after the button was pressed.
+    webrtcApiRef.current?.stopMedia();
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+
     setRecording(false);
     setStopped(true);
     if (isFullscreenActive()) exitFullscreen().catch(() => {});
+    // Also what stops the live-speech capture, which is gated on !callEnded.
     setCallEnded(true);
     setTimeout(loadConsolidatedReport, 1000);
   }
@@ -641,7 +652,39 @@ export default function InterviewerCapturePage() {
               </div>
             )}
 
-            {/* In-Call Action Toolbar */}
+            {/* In-Call Action Toolbar — gone once the call is over. Leaving it up implied
+                the call was still live, and "Start Audio Record" would genuinely re-open
+                the microphone after the interview had ended. */}
+            {callEnded ? (
+              <div className="bg-white border border-zinc-200 rounded-xl p-4 shadow-xs space-y-3">
+                <p className="text-sm font-semibold text-emerald-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                  Interview ended — camera, microphone and recording are all off.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setShowScorecard(true)}
+                    className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs"
+                  >
+                    View Consolidated Scorecard
+                  </button>
+                  {closeFailed ? (
+                    <span className="text-xs text-zinc-500">
+                      Your browser won&apos;t let a page close a tab it didn&apos;t open —
+                      close this one yourself when you&apos;re done. Nothing is still
+                      recording.
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleCloseTab}
+                      className="px-3.5 py-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-bold border border-zinc-200"
+                    >
+                      Close this tab
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div className="flex flex-wrap items-center justify-between bg-white border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
               <div className="flex items-center gap-2">
                 <button
@@ -698,8 +741,11 @@ export default function InterviewerCapturePage() {
                 </button>
               </div>
             </div>
+            )}
 
-            {micError && <p className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">{micError}</p>}
+            {micError && !callEnded && (
+              <p className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">{micError}</p>
+            )}
           </div>
 
           {/* Right Column: AI Intelligence & Live Telemetry Tabs */}

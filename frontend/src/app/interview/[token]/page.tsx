@@ -222,12 +222,36 @@ function IdentityCheck({
   const [cameraError, setCameraError] = useState<string | null>(null);
 
   useEffect(() => {
+    // The stream has to be released when this step is done. Without the cleanup below it
+    // stayed open for the rest of the session, so by the time the interview itself asked
+    // for the camera the device was still held by this screen — and on hardware that only
+    // allows one capture at a time that surfaces as NotReadableError, i.e. a black video
+    // on both sides of the call with nothing explaining why.
+    //
+    // `cancelled` covers the case where the component unmounts (or Strict Mode re-runs the
+    // effect) while getUserMedia is still resolving: the stream arrives after teardown and
+    // would otherwise never be stopped by anyone.
+    let cancelled = false;
+    let stream: MediaStream | null = null;
+
     navigator.mediaDevices
       .getUserMedia({ video: true })
-      .then((stream) => {
-        if (videoRef.current) videoRef.current.srcObject = stream;
+      .then((s) => {
+        stream = s;
+        if (cancelled) {
+          s.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        if (videoRef.current) videoRef.current.srcObject = s;
       })
-      .catch((err) => setCameraError(cameraErrorMessage(err)));
+      .catch((err) => {
+        if (!cancelled) setCameraError(cameraErrorMessage(err));
+      });
+
+    return () => {
+      cancelled = true;
+      stream?.getTracks().forEach((t) => t.stop());
+    };
   }, []);
 
   function grabFrame(): { blob: Promise<Blob | null>; canvas: HTMLCanvasElement } {
@@ -996,9 +1020,10 @@ function InterviewRecorder({
 
     // Everything media-related stops here, unconditionally, before any network call — a
     // failed request below must never leave the candidate's camera/mic/screen-share
-    // running. (The live call's own camera/mic releases separately, via WebRTCRoom's own
-    // unmount cleanup once onDone() below causes the parent to stop rendering this stage —
-    // guaranteed by the finally, not left contingent on the network calls succeeding.)
+    // running. The live call's devices are cut explicitly rather than waiting for
+    // WebRTCRoom to unmount: that unmount only happens once onDone() re-renders the parent,
+    // so the camera light stayed on for a moment after the interview had visibly finished.
+    webrtcApiRef.current?.stopMedia();
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());

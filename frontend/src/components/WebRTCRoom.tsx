@@ -21,6 +21,11 @@ export interface WebRTCApi {
   requestPeerMute: () => void;
   /** Tells the other participant's page the call is over from this end. */
   notifyPeerEnded: () => void;
+  /** Releases the camera and microphone immediately — the device light goes out and the
+   * OS sees them as free. Unmounting this component does the same thing, but that only
+   * happens on a later render; "End call" has to mean the devices are off at the moment
+   * it is pressed, not shortly afterwards. Safe to call more than once. */
+  stopMedia: () => void;
 }
 
 interface WebRTCRoomProps {
@@ -51,6 +56,34 @@ function wsBaseUrl(): string {
 }
 
 const DEFAULT_ICE_SERVERS: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+/** Plain-language reason the camera/mic couldn't be opened, for the person in the call.
+ * A failure here used to be a console warning only, which left an unexplained black
+ * rectangle on both sides — the single least diagnosable state this component has. */
+function mediaErrorMessage(err: unknown, gotAudio: boolean): string {
+  const name = err instanceof DOMException ? err.name : "";
+
+  if (name === "NotReadableError" || name === "TrackStartError") {
+    // By far the most common cause: the device is open somewhere else. On Windows most
+    // webcams can only be held by one capture at a time.
+    return gotAudio
+      ? "Your camera is already in use by another app or browser tab, so you've joined with audio only. Close whatever is using it — including any other interview tab — then rejoin to turn video on."
+      : "Your camera and microphone are already in use by another app or browser tab. Close whatever is using them, then rejoin.";
+  }
+  if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+    return gotAudio
+      ? "Camera access was blocked, so you've joined with audio only. Allow it in the browser prompt and in your computer's privacy settings, then rejoin."
+      : "Camera and microphone access was blocked. Allow it in the browser prompt and in your computer's privacy settings, then rejoin.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return gotAudio
+      ? "No camera was found on this device, so you've joined with audio only."
+      : "No camera or microphone was found on this device.";
+  }
+  return gotAudio
+    ? "Couldn't turn your camera on, so you've joined with audio only."
+    : "Couldn't turn on your camera or microphone.";
+}
 
 /** Tells the peer which incoming video track is the screen share. Without this the
  * receiving side has to guess from arrival order, and with two video m-lines that order
@@ -100,6 +133,7 @@ export default function WebRTCRoom({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hasRemoteScreen, setHasRemoteScreen] = useState(false);
   const [peerPresent, setPeerPresent] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -246,7 +280,18 @@ export default function WebRTCRoom({
           audio: true
         });
       } catch (e) {
-        console.warn("Could not acquire local camera/mic", e);
+        // Losing the camera must not take the microphone down with it. Asking for both at
+        // once is all-or-nothing, so a busy or blocked camera previously left the call with
+        // no media at all — silently, since this was only a console warning. Retry for
+        // audio so the interview can still go ahead, and tell the user what happened.
+        console.warn("Could not acquire camera; retrying audio-only", e);
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          if (!cancelled) setMediaError(mediaErrorMessage(e, true));
+        } catch (audioErr) {
+          console.warn("Could not acquire microphone either", audioErr);
+          if (!cancelled) setMediaError(mediaErrorMessage(audioErr, false));
+        }
       }
 
       if (cancelled) {
@@ -353,6 +398,11 @@ export default function WebRTCRoom({
         },
         requestPeerMute: () => send({ type: "mute-request" }),
         notifyPeerEnded: () => send({ type: "call-ended" }),
+        stopMedia: () => {
+          localStream?.getTracks().forEach((t) => t.stop());
+          // The screen-share track is owned by the page that passed it in, so it is left
+          // alone here; that page stops it as part of its own teardown.
+        },
       });
 
       const wsUrl = `${wsBaseUrl()}/interviews/${sessionId}/ws/signal?token=${encodeURIComponent(
@@ -489,6 +539,11 @@ export default function WebRTCRoom({
     return (
       <div ref={containerRef} className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3">
         <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+        {mediaError && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 max-w-lg px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium shadow-md">
+            ⚠️ {mediaError}
+          </div>
+        )}
 
         {/* Candidate Screenshare Viewport (Always in DOM) */}
         <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
@@ -580,6 +635,11 @@ export default function WebRTCRoom({
   return (
     <div ref={containerRef} className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      {mediaError && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 max-w-lg px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium shadow-md">
+          ⚠️ {mediaError}
+        </div>
+      )}
       {!peerPresent && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
           Waiting for interviewer to join…
@@ -688,6 +748,11 @@ function LiveKitRoomRenderer({
             encoder.encode(JSON.stringify({ type: "call-ended" })),
             { reliable: true }
           ).catch((err) => console.error("failed to publish data", err));
+        },
+        stopMedia: () => {
+          // Disabling these unpublishes the tracks and hands the devices back.
+          room.localParticipant.setCameraEnabled(false).catch(() => {});
+          room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
         },
       });
     }
