@@ -30,7 +30,7 @@ export default function LiveTranscriptFeed({
   }, [items, interviewerCapturing]);
 
   return (
-    <div className={`flex flex-col bg-white border border-zinc-200 rounded-xl p-3.5 text-sm text-zinc-900 shadow-sm ${className}`}>
+    <div className={`flex flex-col bg-surface border border-zinc-200 rounded-xl p-3.5 text-sm text-zinc-900 shadow-sm ${className}`}>
       <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-200">
         <div className="flex items-center gap-2">
           <span className="relative flex h-2.5 w-2.5">

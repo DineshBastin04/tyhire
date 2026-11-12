@@ -119,7 +119,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
           <div
             role="dialog"
             aria-modal="true"
-            className="bg-white rounded-md shadow-lg max-w-sm w-full p-5 space-y-3"
+            className="bg-surface rounded-md shadow-lg max-w-sm w-full p-5 space-y-3"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-sm font-semibold text-zinc-900">{state.options.title}</h2>

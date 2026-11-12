@@ -1,13 +1,26 @@
 @import "tailwindcss";
 
+/* Class/attribute-based dark mode keyed off <html data-theme="dark"> (set by the no-flash
+   script in layout.tsx + the header toggle). Lets us write `dark:` utilities for the few
+   spots the variable remap below can't reach cleanly. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
-  /* Committed to a light theme on purpose: native <select>/<input> controls otherwise
-     silently pick up the OS dark-mode UA stylesheet (dark control bg, dark text) even
-     when our own CSS doesn't ask for it — that's what made text unreadable before. */
+  /* color-scheme follows the active theme so native <select>/<input>/scrollbars render with
+     the right UA chrome. It used to be pinned to `light` because, with no real dark theme,
+     OS dark mode would silently darken native controls and make text unreadable. Now that we
+     have an explicit dark theme (and theme the controls ourselves below), we WANT the control
+     chrome to match — so this is set per-theme instead (light here, dark in the block below). */
   color-scheme: light;
 
   --background: #ffffff;
   --foreground: #111827;
+
+  /* Card / header / panel / input surface. Split out from Tailwind's `white` because
+     `bg-white` and `text-white` both compile to var(--color-white): surfaces must darken in
+     dark mode, but white text on colored buttons must stay light. So surfaces use this token
+     (via the `bg-surface` utility) and `--color-white` is left as true white. */
+  --surface: #ffffff;
 
   /* Blue throughout for every button and container tint — kept off the red/purple "AI
      tool" defaults there. The one deliberate exception is the small severity dots below:
@@ -24,9 +37,84 @@
   --color-severity-high: #dc2626;
 }
 
+/* Dark theme. Because Tailwind v4 compiles color utilities to `var(--color-<name>-<shade>)`,
+   redefining those variables in this scope reskins the whole app (~500 neutral usages + every
+   tint) with no per-element `dark:` churn. Shades are mapped by how the app actually uses each
+   one (verified by a usage audit), NOT by blind scale inversion — e.g. zinc-900 is text-only so
+   it goes light, while zinc-950 is background-only so it stays dark. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --surface: #161b22;
+
+  /* Neutral ramp (zinc): subtle surfaces + borders go dark, text shades go light. */
+  --color-zinc-50: #1c2129;   /* subtle bg */
+  --color-zinc-100: #21262d;  /* subtle bg / subtle border */
+  --color-zinc-200: #30363d;  /* default border (heavy use) */
+  --color-zinc-300: #3d444d;  /* stronger border / native control border */
+  --color-zinc-400: #6e7681;  /* faint text */
+  --color-zinc-500: #8b949e;  /* muted text (heaviest use) */
+  --color-zinc-600: #b1bac4;
+  --color-zinc-700: #c9d1d9;
+  --color-zinc-800: #d1d9e0;
+  --color-zinc-900: #e6edf3;  /* strong text */
+  --color-zinc-950: #010409;  /* background-only in the app → stays very dark */
+
+  /* Blue: accent/fills stay saturated (readable with white text), tint shades become dark
+     tints, text-only shades become light. */
+  --color-blue-light: #16233b;
+  --color-blue-mid: #1e3356;
+  --color-blue-strong: #27406b;
+  --color-blue: #3b82f6;
+  --color-blue-dark: #1d4ed8;
+  --color-blue-50: #16233b;
+  --color-blue-100: #1e3356;
+  --color-blue-200: #27406b;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #3b82f6;
+  --color-blue-700: #3b82f6;
+  --color-blue-800: #93c5fd;
+  --color-blue-900: #bfdbfe;
+  --color-blue-950: #dbeafe;
+
+  /* Purple (communication-score accents) */
+  --color-purple-50: #241a33;
+  --color-purple-200: #5b3a8a;
+  --color-purple-600: #8b5cf6;
+  --color-purple-700: #c4b5fd;
+  --color-purple-950: #ede9fe;
+
+  /* Emerald (skill chips) */
+  --color-emerald-50: #0f2a1f;
+  --color-emerald-200: #1e5540;
+  --color-emerald-300: #227a57;
+  --color-emerald-500: #10b981;
+  --color-emerald-700: #6ee7b7;
+  --color-emerald-800: #a7f3d0;
+  --color-emerald-900: #d1fae5;
+
+  /* Red (errors / danger) */
+  --color-red-50: #2a1416;
+  --color-red-200: #5b2626;
+  --color-red-500: #ef4444;
+  --color-red-600: #f87171;
+  --color-red-700: #ef4444;
+  --color-red-800: #fca5a5;
+  --color-red-900: #fecaca;
+
+  /* Amber (warnings) */
+  --color-amber-50: #2a2110;
+  --color-amber-300: #6b5220;
+  --color-amber-700: #fcd34d;
+  --color-amber-900: #fde68a;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -45,13 +133,14 @@
     font-family: Arial, Helvetica, sans-serif;
   }
 
-  /* Baseline for every native control, so none can fall back to OS dark styling. */
+  /* Native controls are themed via tokens so they follow light/dark (bg/border/text all
+     move with the theme); color-scheme above handles the dropdown/scrollbar UA chrome. */
   input,
   select,
   textarea {
-    background: white;
+    background: var(--surface);
     color: var(--foreground);
-    border: 1px solid #cbd5e1;
+    border: 1px solid var(--color-zinc-300);
     border-radius: 0.375rem;
   }
 
@@ -139,7 +228,8 @@
      button in this app (including the bordered/outline ones) now has a filled shape with
      padding, so any boxed pill still reads as "a button" next to them. A dot is
      unambiguously not clickable, so conventional green/amber/red on just the dot reads as
-     a clear severity signal without reintroducing a red/purple "AI tool" box anywhere. */
+     a clear severity signal without reintroducing a red/purple "AI tool" box anywhere.
+     Text uses --foreground so it stays readable in both themes. */
   .badge-approved,
   .badge-review,
   .badge-declined {
@@ -160,21 +250,21 @@
     flex-shrink: 0;
   }
   .badge-approved {
-    color: var(--color-blue-dark);
+    color: var(--foreground);
     font-weight: 500;
   }
   .badge-approved::before {
     background: var(--color-severity-low);
   }
   .badge-review {
-    color: var(--color-blue-dark);
+    color: var(--foreground);
     font-weight: 500;
   }
   .badge-review::before {
     background: var(--color-severity-medium);
   }
   .badge-declined {
-    color: var(--color-blue-dark);
+    color: var(--foreground);
     font-weight: 700;
   }
   .badge-declined::before {
@@ -186,7 +276,8 @@
   /* Large section/column backgrounds (e.g. the Kanban buckets) — a different job from the
      inline status dots above, so a separate set of classes: these need an actual tinted
      background to read as a grouped section, which would look like a giant button if it
-     were one of the small inline badges instead. */
+     were one of the small inline badges instead. (These track the blue-light/mid/strong
+     tokens, which are re-tinted for dark mode above.) */
   .bucket-approved {
     background: var(--color-blue-light);
   }

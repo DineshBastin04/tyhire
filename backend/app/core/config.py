@@ -8,6 +8,15 @@ class Settings(BaseSettings):
     storage_root: str = "../storage"
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # AI Candidate Comparison (api/v1/comparison.py). The max is a hard cap on how many
+    # candidates one comparison request may include — bounds both prompt size/token cost and
+    # the readability of the resulting table. Default 10 is the tested ceiling for a single
+    # bounded request; raise deliberately (and re-test) rather than assuming higher scales.
+    # The timeout is the per-request ceiling on the single OpenAI call, after which the
+    # comparison degrades gracefully to the factual table with no AI narrative.
+    comparison_max_candidates: int = 10
+    comparison_ai_timeout_seconds: float = 60.0
+
     # Signs the HR session cookie — rotating this logs everyone out. Required, with no
     # fallback: a guessable default here would let anyone forge a valid HR session cookie.
     session_secret: str

@@ -35,7 +35,19 @@ export default function RootLayout({
           inject attributes onto <html>/<body> before React hydrates, which is not a bug in
           this app and isn't fixable from our side. Scoped to just these two tags so real
           hydration mismatches anywhere else in the app still surface normally. */}
-      <body className="min-h-full flex flex-col bg-white" suppressHydrationWarning>
+      {/* Applies the saved/system theme to <html data-theme> before first paint, so there's
+          no light-mode flash on a dark-mode load. Must run synchronously before the body
+          renders, so it lives in <head> (a sync inline <script> directly under <html> is
+          rejected by React 19 — it can't order it; async would defeat the no-flash purpose).
+          Falls back to light if anything throws (e.g. storage blocked). */}
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark'){t=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`,
+          }}
+        />
+      </head>
+      <body className="min-h-full flex flex-col bg-background" suppressHydrationWarning>
         <DialogProvider>
           <SiteHeader />
           <main className="flex-1 flex flex-col">{children}</main>

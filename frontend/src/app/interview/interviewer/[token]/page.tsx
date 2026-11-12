@@ -406,7 +406,7 @@ export default function InterviewerCapturePage() {
   if (error) {
     return (
       <div className="flex flex-1 items-center justify-center p-6 bg-zinc-50 min-h-screen text-zinc-900">
-        <div className="max-w-md p-6 bg-white border border-zinc-200 rounded-xl text-center shadow-md">
+        <div className="max-w-md p-6 bg-surface border border-zinc-200 rounded-xl text-center shadow-md">
           <p className="text-red-600 font-medium">{error}</p>
         </div>
       </div>
@@ -429,7 +429,7 @@ export default function InterviewerCapturePage() {
   return (
     <div className="flex flex-col min-h-screen bg-zinc-50 text-zinc-900 font-sans">
       {/* Top Header with TyHire Logo */}
-      <header className="flex items-center justify-between px-6 py-3.5 bg-white border-b border-zinc-200 shrink-0 sticky top-0 z-20 shadow-xs">
+      <header className="flex items-center justify-between px-6 py-3.5 bg-surface border-b border-zinc-200 shrink-0 sticky top-0 z-20 shadow-xs">
         <div className="flex items-center gap-4">
           <Image src="/logo.png" alt="TyHire" width={120} height={40} priority className="h-7 w-auto" />
           <div className="h-5 w-px bg-zinc-200" />
@@ -448,7 +448,7 @@ export default function InterviewerCapturePage() {
 
         <div className="flex items-center gap-3">
           {joined && !callEnded && (
-            <div className="flex items-center gap-2 px-3 py-1 bg-white border border-zinc-200 rounded-full text-xs shadow-xs">
+            <div className="flex items-center gap-2 px-3 py-1 bg-surface border border-zinc-200 rounded-full text-xs shadow-xs">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               <span className="text-zinc-700 text-xs font-semibold font-mono">
                 {formatOffset(elapsedMs)}
@@ -464,7 +464,7 @@ export default function InterviewerCapturePage() {
           )}
 
           {joined && !callEnded && (
-            <div className="flex items-center gap-2 px-3 py-1 bg-white border border-zinc-200 rounded-full text-xs shadow-xs">
+            <div className="flex items-center gap-2 px-3 py-1 bg-surface border border-zinc-200 rounded-full text-xs shadow-xs">
               <span className={`w-2 h-2 rounded-full ${isCandidateGazeFocused ? "bg-emerald-500" : "bg-red-500 animate-ping"}`} />
               <span className={isCandidateGazeFocused ? "text-emerald-700 text-xs font-semibold" : "text-red-600 text-xs font-bold"}>
                 {isCandidateGazeFocused ? "🟢 Gaze: Focused On Camera" : "🔴 Gaze: Looking Away"}
@@ -495,7 +495,7 @@ export default function InterviewerCapturePage() {
       {/* Pre-Join Screen */}
       {!joined ? (
         <div className="flex flex-1 items-center justify-center p-8">
-          <div className="max-w-lg w-full bg-white border border-zinc-200 rounded-2xl p-8 text-center shadow-lg space-y-6">
+          <div className="max-w-lg w-full bg-surface border border-zinc-200 rounded-2xl p-8 text-center shadow-lg space-y-6">
             <div className="w-16 h-16 bg-blue-50 border border-blue-200 rounded-2xl flex items-center justify-center mx-auto text-3xl">
               🎯
             </div>
@@ -524,7 +524,7 @@ export default function InterviewerCapturePage() {
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 max-w-[1600px] w-full mx-auto">
           {/* Left Column: Two-Part Video/Screenshare & Active Question / Then-and-There Decision */}
           <div className="lg:col-span-7 flex flex-col gap-3">
-            <div className="relative w-full h-[450px] bg-white rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
+            <div className="relative w-full h-[450px] bg-surface rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
               {!callEnded ? (
                 <WebRTCRoom
                   sessionId={session.id}
@@ -552,7 +552,7 @@ export default function InterviewerCapturePage() {
 
             {/* Active Question & "Then and There" Instant Decision Bar */}
             {activeQuestion && (
-              <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3 shadow-xs">
+              <div className="bg-surface border border-zinc-200 rounded-xl p-4 space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700">
                     Active Question · {activeQuestion.category} · {activeQuestion.difficulty}
@@ -630,7 +630,7 @@ export default function InterviewerCapturePage() {
             )}
 
             {/* In-Call Action Toolbar */}
-            <div className="flex flex-wrap items-center justify-between bg-white border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between bg-surface border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
@@ -689,7 +689,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("questions")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "questions" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "questions" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🤖 AI Questions ({suggestedQuestions.length})
@@ -697,7 +697,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("transcript")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "transcript" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "transcript" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🎙️ Live Transcript
@@ -705,7 +705,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("sentiment")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "sentiment" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "sentiment" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🧠 Sentiment
@@ -713,7 +713,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("proctoring")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "proctoring" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "proctoring" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🛡️ Signals ({liveSignals.length})
@@ -721,7 +721,7 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("evaluation")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "evaluation" ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "evaluation" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 📝 Notes
@@ -732,7 +732,7 @@ export default function InterviewerCapturePage() {
             <div className="flex-1">
               {/* Tab 0: AI-Suggested Questions Bank */}
               {activeTab === "questions" && (
-                <div className="bg-white border border-zinc-200 rounded-xl p-3.5 space-y-3 h-[450px] overflow-y-auto shadow-xs">
+                <div className="bg-surface border border-zinc-200 rounded-xl p-3.5 space-y-3 h-[450px] overflow-y-auto shadow-xs">
                   <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">GPT-Suggested Question Bank</h3>
                     <span className="text-[10px] text-zinc-500 font-mono">Tailored to Resume & JD</span>
@@ -748,7 +748,7 @@ export default function InterviewerCapturePage() {
                           className={`p-3 rounded-xl border text-xs transition-all ${
                             isSelected
                               ? "bg-blue-50/70 border-blue-500 ring-1 ring-blue-500/50 shadow-xs"
-                              : "bg-white border-zinc-200 hover:border-zinc-300"
+                              : "bg-surface border-zinc-200 hover:border-zinc-300"
                           }`}
                         >
                           <div className="flex items-center justify-between mb-1.5">
@@ -806,7 +806,7 @@ export default function InterviewerCapturePage() {
                     className="h-[390px]"
                   />
                   {/* Quick Speech / Utterance Entry Bar */}
-                  <div className="flex gap-1.5 bg-white border border-zinc-200 rounded-xl p-1.5 shadow-xs">
+                  <div className="flex gap-1.5 bg-surface border border-zinc-200 rounded-xl p-1.5 shadow-xs">
                     <input
                       type="text"
                       placeholder="Type test candidate or interviewer utterance..."
@@ -829,7 +829,7 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 2: Live Sentiment & Emotional Affect */}
               {activeTab === "sentiment" && (
-                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3.5 h-[450px] overflow-y-auto shadow-xs">
+                <div className="bg-surface border border-zinc-200 rounded-xl p-4 space-y-3.5 h-[450px] overflow-y-auto shadow-xs">
                   <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Emotional & Voice Telemetry</h3>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">
@@ -921,7 +921,7 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 3: Live Proctoring & Integrity */}
               {activeTab === "proctoring" && (
-                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-3 h-[450px] flex flex-col shadow-xs">
+                <div className="bg-surface border border-zinc-200 rounded-xl p-4 space-y-3 h-[450px] flex flex-col shadow-xs">
                   <div className="flex items-center justify-between border-b border-zinc-100 pb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Proctoring Signal Feed</h3>
                     <span className="text-[10px] text-zinc-500 font-mono">{liveSignals.length} events logged</span>
@@ -949,7 +949,7 @@ export default function InterviewerCapturePage() {
 
               {/* Tab 4: Evaluation & Live Read */}
               {activeTab === "evaluation" && (
-                <div className="bg-white border border-zinc-200 rounded-xl p-4 space-y-4 h-[450px] flex flex-col justify-between shadow-xs">
+                <div className="bg-surface border border-zinc-200 rounded-xl p-4 space-y-4 h-[450px] flex flex-col justify-between shadow-xs">
                   <div className="space-y-3">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-700">Live Interviewer Decision</h3>
                     <p className="text-xs text-zinc-500">Record your evaluation in real time during the call:</p>
@@ -1000,7 +1000,7 @@ export default function InterviewerCapturePage() {
       {/* Post-Meeting Consolidated Scorecard Modal */}
       {showScorecard && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-white border border-zinc-200 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-6 my-8">
+          <div className="bg-surface border border-zinc-200 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-6 my-8">
             <div className="flex items-center justify-between border-b border-zinc-200 pb-3">
               <div>
                 <h2 className="text-lg font-bold text-zinc-900 flex items-center gap-2">
@@ -1044,7 +1044,7 @@ export default function InterviewerCapturePage() {
                 <h4 className="text-xs font-bold text-zinc-700 uppercase">AI-Evaluated Question Scorecard</h4>
                 <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                   {ratedQuestions.map((rq, idx) => (
-                    <div key={idx} className="p-2.5 rounded-lg bg-white border border-zinc-200 text-xs flex items-start justify-between gap-3 shadow-2xs">
+                    <div key={idx} className="p-2.5 rounded-lg bg-surface border border-zinc-200 text-xs flex items-start justify-between gap-3 shadow-2xs">
                       <div className="space-y-0.5">
                         <p className="font-bold text-zinc-900">{rq.question_text}</p>
                         {rq.concepts_covered?.length > 0 && (
@@ -1078,7 +1078,7 @@ export default function InterviewerCapturePage() {
                   placeholder="Enter interviewer email address (e.g. interviewer@company.com)"
                   value={emailRecipient}
                   onChange={(e) => setEmailRecipient(e.target.value)}
-                  className="flex-1 bg-white border border-zinc-200 rounded-lg px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-blue-500"
+                  className="flex-1 bg-surface border border-zinc-200 rounded-lg px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-blue-500"
                 />
                 <button
                   onClick={handleSendEmailReport}

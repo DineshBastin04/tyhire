@@ -269,6 +269,121 @@ export interface L1PhoneScreening {
   created_at: string;
 }
 
+export interface DashboardSummary {
+  jobs: { active: number; archived: number };
+  candidates: {
+    total_active: number;
+    approved: number;
+    review: number;
+    declined: number;
+    needs_review: number;
+    processing_failed: number;
+    duplicates: number;
+  };
+  interviews: { pending: number; completed: number; awaiting_review: number };
+  recent_candidates: Array<{
+    id: string;
+    full_name: string | null;
+    job_id: string;
+    job_title: string | null;
+    bucket: Bucket | null;
+    fit_score: number | null;
+    created_at: string | null;
+  }>;
+  recent_activity: Array<{
+    actor: string;
+    action: string;
+    detail: Record<string, unknown> | null;
+    created_at: string | null;
+  }>;
+}
+
+// ---- AI Candidate Comparison -----------------------------------------------------------
+export interface CompareRequest {
+  candidate_ids: string[];
+}
+
+export interface ComparisonScores {
+  fit_score: number | null;
+  technical_score: number | null;
+  communication_score: number | null;
+  manual_score_adjustment: number | null;
+  manual_adjustment_reason: string | null;
+  effective_fit_score: number | null;
+}
+
+export interface ComparisonL1 {
+  overall_l1_score: number | null;
+  technical_score: number | null;
+  communication_score: number | null;
+  verdict: string | null;
+  strengths: string[];
+  red_flags: string[];
+  summary: string | null;
+}
+
+export interface ComparisonInterview {
+  status: string | null;
+  interviewer_decision: string | null;
+  qa_relevant_count: number | null;
+  qa_total_count: number | null;
+  /** Review-context only — never a competence/ranking signal. */
+  integrity_needs_review: boolean;
+  completed_at: string | null;
+}
+
+export interface ComparisonTableRow {
+  candidate_id: string;
+  ref: string;
+  full_name: string | null;
+  bucket: string | null;
+  override_bucket: string | null;
+  scores: ComparisonScores;
+  relevant_skills: string[];
+  missing_critical_skills: string[];
+  years_experience: number | string | null;
+  education: string[];
+  certifications: string[];
+  knockout_failed: boolean;
+  knockout_reasons: string[];
+  l1: ComparisonL1 | null;
+  interview: ComparisonInterview | null;
+  data_completeness: string[];
+}
+
+export interface ComparisonCandidateAnalysis {
+  candidate_id: string;
+  ref: string;
+  strengths: string[];
+  gaps: string[];
+  evidence: string[];
+  insufficient_data: string[];
+}
+
+export interface ComparisonDifferentiator {
+  criterion: string;
+  detail: string;
+}
+
+export interface AIComparison {
+  overall_summary: string;
+  per_candidate: ComparisonCandidateAnalysis[];
+  differentiators: ComparisonDifferentiator[];
+  follow_up_questions: string[];
+  conclusion: string;
+}
+
+export interface CandidateComparisonResponse {
+  job: { id: string; title: string };
+  generated_at: string;
+  candidate_count: number;
+  max_candidates: number;
+  table: ComparisonTableRow[];
+  analysis: AIComparison;
+  ai_available: boolean;
+  ai_error: string | null;
+}
+
 export interface BulkUploadBatch {
   id: string;
   job_id: string;
