@@ -243,9 +243,11 @@ export type SignalType =
   | "devtools_open"
   | "screen_share_partial"
   | "screen_share_stopped"
+  | "screen_share_never"
   | "location_mismatch"
   | "ai_extension_detected"
-  | "teleprompter_reading";
+  | "teleprompter_reading"
+  | "proctoring_tamper_detected";
 
 export interface LiveSignalEvent {
   signal_type: SignalType;

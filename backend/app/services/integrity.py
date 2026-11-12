@@ -32,6 +32,10 @@ LOW_SIGNAL_ALONE = {
     SignalType.excessive_motion,
     SignalType.window_blur,
     SignalType.devtools_open,
+    # Screen sharing is optional, so never sharing is an ordinary choice, not evidence.
+    # It is recorded for the reviewer's context and only becomes interesting if it lands
+    # in the same window as something that is.
+    SignalType.screen_share_never,
 }
 
 # window_blur fires as a near-certain side effect of tab_switch — the OS window loses
@@ -163,9 +167,13 @@ def _summarize(distinct_types: set[SignalType], cluster: list[SignalEvent]) -> s
         SignalType.devtools_open: "Browser DevTools possibly open",
         SignalType.screen_share_partial: "Shared a single tab/window, not the full screen",
         SignalType.screen_share_stopped: "Stopped screen sharing mid-interview",
+        SignalType.screen_share_never: "Never shared their screen",
         SignalType.location_mismatch: "IP-resolved location doesn't match stated location",
         SignalType.ai_extension_detected: "AI answer-helper browser extension detected",
         SignalType.teleprompter_reading: "Teleprompter / Script-reading eye motion pattern",
+        SignalType.proctoring_tamper_detected: (
+            "Browser extension interfering with proctoring (focus/visibility faked)"
+        ),
     }
     duration_s = round((cluster[-1].session_offset_ms - cluster[0].session_offset_ms) / 1000, 1)
     parts = " + ".join(labels[t] for t in distinct_types)

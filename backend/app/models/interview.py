@@ -141,6 +141,13 @@ class SignalType(str, enum.Enum):
     devtools_open = "devtools_open"
     screen_share_partial = "screen_share_partial"
     screen_share_stopped = "screen_share_stopped"
+    # Recorded once, at the end, when the candidate never shared their screen at all.
+    # Screen sharing used to be mandatory before joining, so a reviewer could assume every
+    # interview had one; now that it is optional and requested on demand, its absence is
+    # worth showing on the timeline as context. Deliberately low-weight and listed in
+    # LOW_SIGNAL_ALONE (services/integrity.py) — not sharing is a normal choice, and this
+    # must never flag a session on its own.
+    screen_share_never = "screen_share_never"
     location_mismatch = "location_mismatch"
     # DOM-signature heuristic (lib/extensionDetection.ts) for AI answer-helper browser
     # extensions (Monica AI, Sider, Merlin, and similar ChatGPT-sidebar-style tools)
@@ -148,6 +155,12 @@ class SignalType(str, enum.Enum):
     ai_extension_detected = "ai_extension_detected"
     # Teleprompter / script-reading saccade eye scanning detection
     teleprompter_reading = "teleprompter_reading"
+    # The page's own visibility/focus reporting has been replaced (lib/extensionDetection.ts
+    # detectProctoringTamper) — how anti-blur and "tab focus faker" extensions suppress the
+    # tab_switch / window_blur / fullscreen_exit signals. Weighted heavily: unlike a glance
+    # off-screen this has no innocent explanation, and its purpose is to blind the other
+    # checks, so the absence of those signals afterwards means nothing.
+    proctoring_tamper_detected = "proctoring_tamper_detected"
 
 
 class SignalEvent(Base):

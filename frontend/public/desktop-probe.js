@@ -11,7 +11,7 @@
  * uses — nothing about the reporting side is mocked.
  *
  * Usage:
- *   node probe.js --session-id <uuid> --token <token> [--api-base http://localhost:8000/api/v1]
+ *   node probe.js --session-id <uuid> [--api-base http://localhost:8000/api/v1]
  */
 
 const { execSync } = require("child_process");
@@ -22,7 +22,17 @@ function parseArgs() {
   const config = {
     apiBase: "http://localhost:8000/api/v1",
     intervalSeconds: 5,
-    blockedApps: ["chatgpt", "anydesk", "teamviewer", "obs", "discord"],
+    // Fallback only. The real list is fetched from the server at startup (see
+    // loadBlocklist) so adding a tool doesn't require every candidate to re-download this
+    // file; these are used if that request fails.
+    blockedApps: [
+      "interviewcoder", "interview-coder", "lockedin", "finalround", "final-round",
+      "ghotly", "ghostly", "beyz", "leetcodewizard", "leetcode-wizard", "parakeet",
+      "interviewcopilot", "interview-copilot", "meetassist", "meet-assist", "jobjump",
+      "hcalls", "joblander", "cluely",
+      "chatgpt", "claude", "copilot",
+      "anydesk", "teamviewer", "rustdesk", "ultraviewer", "obs", "discord",
+    ],
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -32,6 +42,8 @@ function parseArgs() {
     else if (args[i] === "--interval") config.intervalSeconds = Number(args[++i]);
     else if (args[i] === "--blocked-apps") {
       config.blockedApps = args[++i].split(",").map((s) => s.trim().toLowerCase());
+      // Recorded so the server list doesn't silently overwrite a deliberate override.
+      config.blockedAppsOverridden = true;
     }
   }
 
@@ -131,13 +143,38 @@ async function tick(config, startedAt) {
   console.log(`[probe] ${new Date().toISOString()} heartbeat -> HTTP ${heartbeat.status}`);
 }
 
+/** Pulls the current watch list from the server. Falls back to the built-in defaults on any
+ * failure — an offline probe that still checks the common tools is far better than one that
+ * silently checks nothing. Skipped entirely if --blocked-apps was passed explicitly. */
+async function loadBlocklist(config) {
+  if (config.blockedAppsOverridden) {
+    console.log("[probe] using --blocked-apps override; not fetching the server list");
+    return;
+  }
+  try {
+    const res = await fetch(
+      `${config.apiBase}/interviews/${config.sessionId}/proctoring-blocklist`,
+      { headers: { "X-Interview-Token": config.token } }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (Array.isArray(data.blocked_apps) && data.blocked_apps.length > 0) {
+      config.blockedApps = data.blocked_apps.map((s) => String(s).toLowerCase());
+      console.log(`[probe] loaded ${config.blockedApps.length} entries from the server`);
+    }
+  } catch (err) {
+    console.warn(`[probe] could not fetch the server list (${err.message}); using built-in defaults`);
+  }
+}
+
 async function main() {
   const config = parseArgs();
   const startedAt = Date.now();
 
   console.log(`[probe] monitoring session ${config.sessionId}`);
   console.log(`[probe] reporting to ${config.apiBase}`);
-  console.log(`[probe] blocked apps: ${config.blockedApps.join(", ")}`);
+  await loadBlocklist(config);
+  console.log(`[probe] watching ${config.blockedApps.length} application name(s)`);
   console.log(`[probe] checking every ${config.intervalSeconds}s — leave this running`);
 
   await tick(config, startedAt).catch((err) => console.error("[probe] tick failed:", err.message));

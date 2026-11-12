@@ -61,6 +61,8 @@ def on_startup():
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'proctoring_tamper_detected'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'screen_share_never'"))
             
             # Phase 1 & 3 Job and Candidate columns
             conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weight_communication FLOAT DEFAULT 0.0;"))

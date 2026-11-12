@@ -64,7 +64,14 @@ from app.schemas.interview import (
 import io
 from app.models.candidate import Candidate
 from app.models.job import Job
-from app.services import geolocation, integrity, sentiment_aggregate, storage, video_provider
+from app.services import (
+    geolocation,
+    integrity,
+    proctoring_blocklist as proctoring_blocklist_hints,
+    sentiment_aggregate,
+    storage,
+    video_provider,
+)
 from app.services.retention import purge_expired_identity_media, purge_expired_l1_recordings
 from app.services.audio_extract import extract_audio_wav
 from app.services.facial_analysis import analyze_facial_affect
@@ -657,6 +664,18 @@ def _probe_connected(session: InterviewSession) -> bool:
 @router.get("/{session_id}/probe-status")
 def probe_status(session: InterviewSession = Depends(require_session_token)):
     return {"connected": _probe_connected(session), "last_seen_at": session.probe_last_seen_at}
+
+
+@router.get("/{session_id}/proctoring-blocklist")
+def proctoring_blocklist(session: InterviewSession = Depends(require_session_token)):
+    """What the desktop probe should watch for, fetched at probe start.
+
+    The probe is a file the candidate downloads and keeps, so anything baked into it is
+    frozen at whatever version they happened to get. Serving the list means adding a tool
+    takes effect on the next interview rather than requiring every candidate to re-download
+    the probe.
+    """
+    return {"blocked_apps": proctoring_blocklist_hints.BLOCKED_APP_HINTS}
 
 
 @router.post("/{session_id}/recording-chunk")
