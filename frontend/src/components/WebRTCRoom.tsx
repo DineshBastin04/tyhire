@@ -19,6 +19,11 @@ export interface WebRTCApi {
   toggleFullscreen: () => boolean;
   /** Interviewer-only: asks the candidate's page to mute itself. */
   requestPeerMute: () => void;
+  /** Interviewer-only: asks the candidate's page to start sharing their screen. The
+   * candidate's browser will only open the picker from their own click, never from this
+   * message — getDisplayMedia requires a user gesture — so this surfaces a prompt on
+   * their side rather than starting a share. */
+  requestPeerScreenShare: () => void;
   /** Tells the other participant's page the call is over from this end. */
   notifyPeerEnded: () => void;
   /** Releases the camera and microphone immediately — the device light goes out and the
@@ -36,6 +41,7 @@ interface WebRTCRoomProps {
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  onScreenShareRequested?: () => void;
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   livekitToken?: string | null;
@@ -101,6 +107,7 @@ export default function WebRTCRoom({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onScreenShareRequested,
   onPeerEnded,
   onPeerConnectedChange,
   livekitToken,
@@ -397,6 +404,7 @@ export default function WebRTCRoom({
           return true;
         },
         requestPeerMute: () => send({ type: "mute-request" }),
+        requestPeerScreenShare: () => send({ type: "screenshare-request" }),
         notifyPeerEnded: () => send({ type: "call-ended" }),
         stopMedia: () => {
           localStream?.getTracks().forEach((t) => t.stop());
@@ -501,6 +509,8 @@ export default function WebRTCRoom({
           }
         } else if (message.type === "mute-request") {
           onMuteRequested?.();
+        } else if (message.type === "screenshare-request") {
+          onScreenShareRequested?.();
         }
       };
     }
@@ -667,6 +677,7 @@ function LiveKitRoomRenderer({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onScreenShareRequested,
   onPeerEnded,
   onPeerConnectedChange,
   enableEyeTracking,
@@ -679,6 +690,7 @@ function LiveKitRoomRenderer({
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  onScreenShareRequested?: () => void;
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   enableEyeTracking?: boolean;
@@ -742,6 +754,13 @@ function LiveKitRoomRenderer({
             { reliable: true }
           ).catch((err) => console.error("failed to publish data", err));
         },
+        requestPeerScreenShare: () => {
+          const encoder = new TextEncoder();
+          room.localParticipant.publishData(
+            encoder.encode(JSON.stringify({ type: "screenshare-request" })),
+            { reliable: true }
+          ).catch((err: unknown) => console.error("failed to publish data", err));
+        },
         notifyPeerEnded: () => {
           const encoder = new TextEncoder();
           room.localParticipant.publishData(
@@ -765,6 +784,8 @@ function LiveKitRoomRenderer({
         const msg = JSON.parse(decoder.decode(payload));
         if (msg.type === "mute-request") {
           onMuteRequested?.();
+        } else if (msg.type === "screenshare-request") {
+          onScreenShareRequested?.();
         } else if (msg.type === "call-ended") {
           onPeerEnded?.();
         }
@@ -781,7 +802,7 @@ function LiveKitRoomRenderer({
       room.off("dataReceived", handleData);
       room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     };
-  }, [onMuteRequested, onPeerEnded, room]);
+  }, [onMuteRequested, onScreenShareRequested, onPeerEnded, room]);
 
   if (role === "interviewer") {
     return (

@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
 import { createFaceSignalDetector } from "@/lib/faceDetection";
-import { detectAiExtensionArtifacts } from "@/lib/extensionDetection";
+import { detectAiExtensionArtifacts, detectProctoringTamper } from "@/lib/extensionDetection";
 import {
   exitFullscreen,
   isFullscreenActive,
@@ -20,7 +20,6 @@ type Stage =
   | "error"
   | "consent"
   | "identity"
-  | "screenshare"
   | "starting"
   | "ready"
   | "interview"
@@ -54,15 +53,6 @@ export default function InterviewJoinPage() {
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [finishHadError, setFinishHadError] = useState(false);
-  const screenStreamRef = useRef<MediaStream | null>(null);
-  // The screen-share track itself lives in state, not read off screenStreamRef during
-  // render below (WebRTCRoom's extraVideoTrack prop) — reading a ref's .current during
-  // render is unsound (react-hooks/refs): render isn't guaranteed to observe a consistent
-  // value, e.g. under Strict Mode's double-invoke or any future concurrent rendering.
-  // screenStreamRef itself stays a ref because its other use (finish()'s stop-tracks
-  // call, InterviewRecorder below) is a real imperative access in an event handler, not a
-  // render read.
-  const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
   const startRef = useRef<number>(Date.now());
 
   useEffect(() => {
@@ -83,17 +73,7 @@ export default function InterviewJoinPage() {
   if (stage === "consent")
     return <ConsentScreen onAccept={() => setStage("identity")} />;
   if (stage === "identity")
-    return <IdentityCheck session={session} onDone={() => setStage("screenshare")} />;
-  if (stage === "screenshare")
-    return (
-      <ScreenShareGate
-        session={session}
-        screenStreamRef={screenStreamRef}
-        onScreenTrack={setScreenTrack}
-        startRef={startRef}
-        onDone={() => setStage("starting")}
-      />
-    );
+    return <IdentityCheck session={session} onDone={() => setStage("starting")} />;
   if (stage === "starting")
     return <StartGate session={session} onReady={() => setStage("ready")} />;
   if (stage === "ready")
@@ -112,8 +92,6 @@ export default function InterviewJoinPage() {
     return (
       <InterviewRecorder
         session={session}
-        screenStreamRef={screenStreamRef}
-        screenTrack={screenTrack}
         startRef={startRef}
         onDone={(hadError) => {
           setFinishHadError(hadError);
@@ -466,84 +444,6 @@ function sendSignal(session: InterviewSession, signal_type: SignalType, session_
   });
 }
 
-function ScreenShareGate({
-  session,
-  screenStreamRef,
-  onScreenTrack,
-  startRef,
-  onDone,
-}: {
-  session: InterviewSession;
-  screenStreamRef: RefObject<MediaStream | null>;
-  onScreenTrack: (track: MediaStreamTrack) => void;
-  startRef: RefObject<number>;
-  onDone: () => void;
-}) {
-  const [error, setError] = useState<string | null>(null);
-  const [requesting, setRequesting] = useState(false);
-
-  async function requestShare() {
-    setRequesting(true);
-    setError(null);
-
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        throw new Error("Screen sharing is not supported in this browser. Please use Chrome, Edge, or Firefox.");
-      }
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      screenStreamRef.current = stream;
-      const track = stream.getVideoTracks()[0];
-      if (!track) throw new Error("No video track found in screen share stream.");
-      onScreenTrack(track);
-      const settings = track.getSettings() as MediaTrackSettings & { displaySurface?: string };
-
-      if (settings.displaySurface && settings.displaySurface !== "monitor") {
-        sendSignal(session, "screen_share_partial", 0, { displaySurface: settings.displaySurface });
-      }
-
-      track.onended = () => {
-        sendSignal(session, "screen_share_stopped", Date.now() - startRef.current);
-      };
-
-      onDone();
-    } catch (err: unknown) {
-      console.warn("Screen share request error:", err);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (
-        err instanceof DOMException &&
-        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")
-      ) {
-        setError(
-          "Screen sharing was cancelled or blocked. Please click the button below and select a screen/window to continue."
-        );
-      } else if (err instanceof DOMException && err.name === "AbortError") {
-        setError("Screen sharing selection was dismissed. Please try again.");
-      } else {
-        setError(msg || "Couldn't start screen sharing. Please try again.");
-      }
-    } finally {
-      setRequesting(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-1 items-center justify-center px-6 py-8">
-      <div className="max-w-md w-full space-y-4 text-center">
-        <h1 className="text-lg font-semibold">Share your screen</h1>
-        <p className="text-sm text-zinc-600">
-          Before continuing, please share your screen. Sharing your entire screen is
-          preferred — if you share only a single tab or window instead, that&apos;s noted for
-          the reviewer, not blocked.
-        </p>
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        <button onClick={requestShare} disabled={requesting} className="btn-primary">
-          {requesting ? "Waiting for permission…" : "Share your screen"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function StartGate({ session, onReady }: { session: InterviewSession; onReady: () => void }) {
   const [status, setStatus] = useState<"checking" | "waiting_probe" | "identity_blocked" | "error">(
     "checking"
@@ -657,11 +557,10 @@ function JoinGate({ onJoin }: { onJoin: () => void }) {
         </p>
         <button
           onClick={() => {
-            // Fired synchronously in this click, same reasoning as ScreenShareGate — this
-            // is the second of two independent attempts, not a fallback for the first: if
-            // the candidate declined/never reached screen-share fullscreen for whatever
-            // reason, the interview itself still shouldn't be the one place fullscreen was
-            // never even tried.
+            // Fired synchronously inside the click, because requestFullscreen only works
+            // from a user gesture. This is now the one place fullscreen is attempted —
+            // the screen-share step that used to make its own attempt is gone, since
+            // sharing no longer gates joining.
             requestFullscreen().catch(() => {});
             onJoin();
           }}
@@ -676,14 +575,10 @@ function JoinGate({ onJoin }: { onJoin: () => void }) {
 
 function InterviewRecorder({
   session,
-  screenStreamRef,
-  screenTrack,
   startRef,
   onDone,
 }: {
   session: InterviewSession;
-  screenStreamRef: RefObject<MediaStream | null>;
-  screenTrack: MediaStreamTrack | null;
   startRef: RefObject<number>;
   onDone: (hadError: boolean) => void;
 }) {
@@ -699,31 +594,74 @@ function InterviewRecorder({
   const [cameraOff, setCameraOff] = useState(false);
   const [muteRequested, setMuteRequested] = useState(false);
   const [isFullscreenOn, setIsFullscreenOn] = useState(false);
-  const [currentScreenTrack, setCurrentScreenTrack] = useState<MediaStreamTrack | null>(
-    screenTrack || screenStreamRef.current?.getVideoTracks()[0] || null
-  );
-
-  useEffect(() => {
-    if (screenTrack) {
-      setCurrentScreenTrack(screenTrack);
-    } else if (screenStreamRef.current) {
-      const t = screenStreamRef.current.getVideoTracks()[0];
-      if (t) setCurrentScreenTrack(t);
-    }
-  }, [screenTrack, screenStreamRef]);
+  const [proctoringWarning, setProctoringWarning] = useState<string | null>(null);
+  // Screen sharing starts off and is opt-in from here on: either the candidate presses the
+  // button below, or the interviewer asks and they accept. The stream is owned by this
+  // component now that nothing acquires one before the call.
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const [currentScreenTrack, setCurrentScreenTrack] = useState<MediaStreamTrack | null>(null);
+  const [screenShareRequested, setScreenShareRequested] = useState(false);
+  const [screenShareError, setScreenShareError] = useState<string | null>(null);
+  // Whether a share ever happened, for the single end-of-interview signal. A ref, not
+  // state: it is only read in finish(), and must survive the share being stopped again.
+  const everSharedRef = useRef(false);
 
   async function toggleScreenShare() {
     if (currentScreenTrack && currentScreenTrack.readyState === "live") {
       currentScreenTrack.stop();
       setCurrentScreenTrack(null);
-    } else {
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        screenStreamRef.current = stream;
-        const track = stream.getVideoTracks()[0];
-        setCurrentScreenTrack(track);
-        track.onended = () => setCurrentScreenTrack(null);
-      } catch {}
+      // Stopping on purpose is the same event the reviewer used to see when a share was
+      // abandoned mid-interview, so it is reported the same way.
+      sendSignal(session, "screen_share_stopped", Date.now() - startRef.current);
+      return;
+    }
+
+    setScreenShareError(null);
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        throw new Error(
+          "Screen sharing isn't supported in this browser. Please use Chrome, Edge, or Firefox."
+        );
+      }
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStreamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error("No video track found in the screen share.");
+
+      setCurrentScreenTrack(track);
+      everSharedRef.current = true;
+      // Accepted — the ask is answered, so stop asking.
+      setScreenShareRequested(false);
+
+      // Both of these used to be reported by the pre-join gate, which no longer exists.
+      // Sharing a single tab or window instead of the whole screen is noted for the
+      // reviewer, never blocked; ending the share is reported whether it was stopped from
+      // this button or from the browser's own "Stop sharing" bar.
+      const settings = track.getSettings() as MediaTrackSettings & { displaySurface?: string };
+      if (settings.displaySurface && settings.displaySurface !== "monitor") {
+        sendSignal(session, "screen_share_partial", Date.now() - startRef.current, {
+          displaySurface: settings.displaySurface,
+        });
+      }
+      track.onended = () => {
+        setCurrentScreenTrack(null);
+        sendSignal(session, "screen_share_stopped", Date.now() - startRef.current);
+      };
+    } catch (err: unknown) {
+      // Shown rather than swallowed: when the interviewer has just asked for the screen,
+      // a silently-dismissed picker leaves both sides waiting on each other.
+      if (
+        err instanceof DOMException &&
+        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")
+      ) {
+        setScreenShareError("Screen sharing was cancelled or blocked. You can try again.");
+      } else if (err instanceof DOMException && err.name === "AbortError") {
+        setScreenShareError("No screen was selected. You can try again.");
+      } else {
+        setScreenShareError(
+          err instanceof Error ? err.message : "Couldn't start screen sharing. Please try again."
+        );
+      }
     }
   }
 
@@ -830,11 +768,32 @@ function InterviewRecorder({
     // call (the extension doesn't uninstall itself mid-interview), so this only pushes
     // the signal once rather than every 4s for the remainder of the interview.
     let aiExtensionFlagged = false;
+    let tamperFlagged = false;
     const extensionInterval = setInterval(() => {
-      if (aiExtensionFlagged) return;
-      if (detectAiExtensionArtifacts()) {
+      if (!aiExtensionFlagged && detectAiExtensionArtifacts()) {
         aiExtensionFlagged = true;
         pushSignal("ai_extension_detected");
+        // Told directly rather than only reported to the interviewer. Someone who left an
+        // assistant installed and didn't think about it can act on this; someone who did
+        // it deliberately now knows it was seen. Either way the flag still stands.
+        setProctoringWarning(
+          "An AI assistant browser extension was detected on this page. Please disable or " +
+            "remove it and reload — this has been noted for the reviewer."
+        );
+      }
+
+      // Checked on the same cadence: an extension can be switched on part-way through, and
+      // the point of this one is that it disables the checks around it.
+      if (!tamperFlagged) {
+        const tamper = detectProctoringTamper();
+        if (tamper) {
+          tamperFlagged = true;
+          pushSignal("proctoring_tamper_detected");
+          setProctoringWarning(
+            `${tamper}. A browser extension is interfering with this interview page. ` +
+              "Please disable it and reload — this has been noted for the reviewer."
+          );
+        }
       }
     }, 4000);
 
@@ -887,6 +846,10 @@ function InterviewRecorder({
     // only sustained conditions do, matching the roadmap's "never an alarm on its own" rule.
     let gazeAwayStreak = 0;
     let secondFaceStreak = 0;
+    // One report per episode — see the emission logic below.
+    let gazeAwayReported = false;
+    let secondFaceReported = false;
+    let motionReported = false;
 
     navigator.mediaDevices
       .getUserMedia({
@@ -951,21 +914,42 @@ function InterviewRecorder({
           const result = await detectFace(videoRef.current);
           if (!result) return;
 
+          // Reported once per episode, not once per frame. These conditions persist for as
+          // long as they last, and re-sending every 800ms produced hundreds of identical
+          // rows — one minute of looking away was ~75 events, which buried every other
+          // signal in the interviewer's feed and made the thing unreadable precisely when
+          // it mattered. The flag resets when the condition clears, so a genuine second
+          // occurrence is still reported.
           if (result.faceCount > 1) {
             secondFaceStreak++;
-            if (secondFaceStreak >= 2) pushSignal("second_face");
+            if (secondFaceStreak >= 2 && !secondFaceReported) {
+              secondFaceReported = true;
+              pushSignal("second_face");
+            }
           } else {
             secondFaceStreak = 0;
+            secondFaceReported = false;
           }
 
           if (result.gazeOffScreen) {
             gazeAwayStreak++;
-            if (gazeAwayStreak >= 3) pushSignal("gaze_off_screen");
+            if (gazeAwayStreak >= 3 && !gazeAwayReported) {
+              gazeAwayReported = true;
+              pushSignal("gaze_off_screen");
+            }
           } else {
             gazeAwayStreak = 0;
+            gazeAwayReported = false;
           }
 
-          if (result.excessiveMotion) pushSignal("excessive_motion");
+          if (result.excessiveMotion) {
+            if (!motionReported) {
+              motionReported = true;
+              pushSignal("excessive_motion");
+            }
+          } else {
+            motionReported = false;
+          }
         }, 800);
       })
       .catch((err) => setCameraError(cameraErrorMessage(err)));
@@ -1029,6 +1013,17 @@ function InterviewRecorder({
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
     if (isFullscreenActive()) exitFullscreen().catch(() => {});
 
+    // Recorded once, here, because it is a fact about the whole interview rather than a
+    // moment in it. Low weight and excluded from standalone flagging (services/
+    // integrity.py) — sharing is optional, so this is context for the reviewer, not an
+    // accusation.
+    if (!everSharedRef.current) {
+      pendingSignals.current.push({
+        signal_type: "screen_share_never",
+        session_offset_ms: Date.now() - startRef.current,
+      });
+    }
+
     let hadError = false;
     try {
       await postJson(`/interviews/${session.id}/signals`, pendingSignals.current, tokenHeader(session));
@@ -1055,6 +1050,12 @@ function InterviewRecorder({
           Live call below — stay on this tab and answer the questions you&apos;re asked.
         </p>
       )}
+      {proctoringWarning && (
+        <div className="w-full max-w-2xl px-4 py-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-sm">
+          <p className="font-semibold mb-0.5">⚠️ Please close this before continuing</p>
+          <p className="text-xs leading-relaxed">{proctoringWarning}</p>
+        </div>
+      )}
       <div className="w-full max-w-2xl h-[420px]">
         <WebRTCRoom
           sessionId={session.id}
@@ -1067,6 +1068,10 @@ function InterviewRecorder({
             webrtcApiRef.current = api;
           }}
           onMuteRequested={() => setMuteRequested(true)}
+          onScreenShareRequested={() => {
+            setScreenShareRequested(true);
+            setScreenShareError(null);
+          }}
           onPeerEnded={() => finish(false)}
           livekitToken={session.livekit_token}
           livekitUrl={session.livekit_url}
@@ -1079,6 +1084,31 @@ function InterviewRecorder({
             Mute now
           </button>
         </p>
+      )}
+      {screenShareRequested && !currentScreenTrack && (
+        <div className="w-full max-w-2xl px-4 py-3 rounded-lg bg-blue-50 border border-blue-300 text-blue-900 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">The interviewer asked you to share your screen</p>
+            <p className="text-xs mt-0.5">
+              Your browser will ask which screen or window to share. Sharing your entire
+              screen is preferred.
+            </p>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <button onClick={toggleScreenShare} className="btn-primary text-xs px-3 py-1.5">
+              Share my screen
+            </button>
+            <button
+              onClick={() => setScreenShareRequested(false)}
+              className="btn-outline text-xs px-2 py-1.5"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      {screenShareError && (
+        <p className="text-xs text-red-600 max-w-2xl text-center">{screenShareError}</p>
       )}
       <div className="flex gap-2">
         <button onClick={toggleMic} className="btn-outline text-xs px-2 py-1">
