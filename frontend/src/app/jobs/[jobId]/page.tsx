@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
@@ -23,8 +23,9 @@ const BUCKET_COLORS: Record<Bucket, string> = {
 };
 
 export default function JobDetailPage() {
-  const { prompt, notify } = useDialog();
+  const { confirm, prompt, notify } = useDialog();
   const { jobId } = useParams<{ jobId: string }>();
+  const router = useRouter();
   const [job, setJob] = useState<Job | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -83,6 +84,29 @@ export default function JobDetailPage() {
       }
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function handleDeleteJob() {
+    if (!job) return;
+    const ok = await confirm({
+      title: "Delete job",
+      description:
+        `Permanently delete "${job.title}"? This also permanently deletes every candidate ` +
+        `attached to this job — their resumes, AI scores, and interview history all go ` +
+        `with it. This cannot be undone.`,
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteJson(`/jobs/${jobId}`, { reason: "Deleted from the job page" });
+      router.push("/jobs");
+    } catch (err) {
+      await notify({
+        title: "Could not delete job",
+        description: err instanceof Error ? err.message : "Could not delete this job.",
+      });
     }
   }
 
@@ -151,9 +175,18 @@ export default function JobDetailPage() {
               {job.level} · {job.work_mode} · required: {job.required_skills.join(", ") || "—"}
             </p>
           </div>
-          <button onClick={() => setEditing(true)} className="btn-outline">
-            Edit job
-          </button>
+          <span className="flex gap-2 shrink-0">
+            <button onClick={() => setEditing(true)} className="btn-outline">
+              Edit job
+            </button>
+            <button
+              onClick={handleDeleteJob}
+              className="btn-danger-outline"
+              title="Permanently delete this job and all of its candidates"
+            >
+              Delete job
+            </button>
+          </span>
         </div>
       )}
 

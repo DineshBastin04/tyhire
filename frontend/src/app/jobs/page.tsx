@@ -58,7 +58,7 @@ export default function JobsPage() {
     try {
       const result = await deleteJson<{ deleted: boolean; candidates_removed: number }>(
         `/jobs/${jobId}`,
-        {}
+        { reason: "Deleted from the jobs list" }
       );
       if (result.candidates_removed > 0) {
         await notify({
@@ -93,8 +93,8 @@ export default function JobsPage() {
       )}
       {!loading && activeJobs.length > 0 && (
         <p className="text-xs text-zinc-400">
-          To permanently delete a job, archive it first — the delete option appears in the
-          Archived list below.
+          Archive hides a job but keeps its candidates. Delete removes the job and every
+          candidate on it for good.
         </p>
       )}
 
@@ -120,6 +120,13 @@ export default function JobsPage() {
                 className="btn-outline text-xs px-2 py-1"
               >
                 Archive
+              </button>
+              <button
+                onClick={() => handleDelete(job.id, job.title)}
+                className="btn-danger-outline text-xs px-2 py-1"
+                title="Permanently delete this job and all of its candidates"
+              >
+                Delete
               </button>
             </span>
           </li>
