@@ -1,9 +1,15 @@
 import json
 
 from app.models.job import Job, JobLevel
-from app.services.openai_client import call_tool
+from app.services import ai_cache
+from app.services.openai_client import MODEL, call_tool
 
 CATEGORIES = ("skills", "experience", "education", "certifications", "communication")
+
+# Bump whenever the system prompt, the rubric bands, or SCORE_TOOL change meaning. Cached
+# scores are keyed on this, so raising it re-scores everything under the new rubric
+# instead of serving numbers produced by the old one.
+PROMPT_VERSION = 2
 
 
 def _subscore_schema(criterion: str) -> dict:
@@ -42,8 +48,25 @@ SCORE_TOOL = {
                 "experience_score": _subscore_schema("work history, tenure, role progression"),
                 "education_score": _subscore_schema("degree relevance, grades, coursework"),
                 "certifications_score": _subscore_schema("relevant certifications and credentials"),
+                # Banded deliberately. This category asks about *written* quality, but the
+                # model is handed the parsed profile, not the resume prose — so without
+                # anchors it was scoring on an impression it can barely observe, and the
+                # same candidate landed on 75 one run and 90 the next. The bands below
+                # tie each value to something actually present in the profile, so the
+                # score is reproducible instead of a coin flip between two plausible ones.
                 "communication_score": _subscore_schema(
-                    "written clarity, structure, conciseness, project impact articulation in resume"
+                    "clarity and substance of how the candidate documented their own work, "
+                    "judged ONLY from the structured profile provided. Apply these bands "
+                    "mechanically and pick the single best fit: "
+                    "90-100 = summary and role entries both state concrete scope and "
+                    "measurable impact; "
+                    "75-89 = clear, well-structured entries describing responsibilities, "
+                    "but impact is mostly unquantified; "
+                    "60-74 = entries are present but terse or generic (titles and dates "
+                    "with little description); "
+                    "40-59 = sparse or inconsistent documentation, gaps in basic detail; "
+                    "0-39 = profile is largely empty or unintelligible. "
+                    "Do not infer spoken communication ability — it is not observable here."
                 ),
                 "skills_breakdown": {
                     "type": "object",
@@ -121,6 +144,28 @@ EXPERIENCED_GUIDANCE = (
 )
 
 
+def _with_defaults(value, defaults: dict) -> dict:
+    """Fills in anything the model left out or returned as null.
+
+    Written this way because `dict.get(key, default)` does NOT cover the case that actually
+    happens: the model emits the key with an explicit null, and `.get` dutifully returns
+    that null instead of the default. That is precisely how `list(entry.get("reasons", []))`
+    became "'NoneType' object is not iterable" on real uploads. The per-key pass matters for
+    the same reason — a present-but-null `relevant_skills` inside an otherwise fine object
+    would still reach the UI and break rendering there instead.
+    """
+    merged = dict(defaults)
+    if isinstance(value, dict):
+        for key, fallback in defaults.items():
+            got = value.get(key)
+            merged[key] = fallback if got is None else got
+        # Keep anything extra the model volunteered; only the known keys are defaulted.
+        for key, got in value.items():
+            if key not in merged and got is not None:
+                merged[key] = got
+    return merged
+
+
 def _redact_for_scoring(profile: dict) -> dict:
     """Strips identity fields the scoring model never needs. Fit-scoring only ever reasons
     about skills/experience/education, so there's no reason it should see who the candidate
@@ -145,6 +190,9 @@ def score_candidate(
         "Classify skills into relevant, missing critical, and irrelevant/extraneous skills. "
         "Evaluate profession alignment, seniority ladder, and industry domain fit. "
         "Every reason must be traceable to either the JD or the candidate profile provided. "
+        "Apply the rubric mechanically: the same profile and JD must always produce the "
+        "same sub-scores, so where a category's description defines score bands, choose the "
+        "band the evidence satisfies rather than an overall impression. "
         + guidance
     )
     user_content = (
@@ -154,7 +202,35 @@ def score_candidate(
         f"Secondary skills: {', '.join(getattr(job, 'secondary_skills', []) or [])}\n\n"
         f"Candidate profile (JSON):\n{json.dumps(_redact_for_scoring(profile), indent=2)}"
     )
-    result = call_tool(system=system, user_content=user_content, tool=SCORE_TOOL)
+    # Memoized so that re-uploading the same resume to the same job returns the same
+    # sub-scores instead of re-rolling them. The key covers everything the answer depends
+    # on — the redacted profile, every JD field in the prompt, the level guidance, the
+    # model, and the rubric version — so editing the job or the rubric misses the cache
+    # and re-scores, while an identical re-upload cannot drift.
+    #
+    # Note the weights are deliberately NOT in the key: they are applied in Python below,
+    # not by the model, so changing them recomputes the overall fit from the same cached
+    # sub-scores rather than paying for an identical call.
+    cache_key = ai_cache.make_key(
+        "fit_score",
+        {
+            "profile": _redact_for_scoring(profile),
+            "jd_text": job.jd_text,
+            "required_skills": list(job.required_skills or []),
+            "core_skills": list(getattr(job, "core_skills", []) or []),
+            "secondary_skills": list(getattr(job, "secondary_skills", []) or []),
+            "level": str(job.level),
+            "model": MODEL,
+            "prompt_version": PROMPT_VERSION,
+        },
+    )
+    result = call_tool(
+        system=system,
+        user_content=user_content,
+        tool=SCORE_TOOL,
+        cache_key=cache_key,
+        cache_kind="fit_score",
+    )
 
     breakdown: dict = {}
     all_reasons: list[str] = []
@@ -190,16 +266,16 @@ def score_candidate(
     )
     comm_score = float(breakdown.get("communication", {}).get("score", 0))
 
-    skills_breakdown = result.get(
-        "skills_breakdown",
+    skills_breakdown = _with_defaults(
+        result.get("skills_breakdown"),
         {
             "relevant_skills": [],
             "missing_critical_skills": [],
             "irrelevant_skills": [],
         },
     )
-    profession_fit = result.get(
-        "profession_fit",
+    profession_fit = _with_defaults(
+        result.get("profession_fit"),
         {
             "seniority_match": "Standard match",
             "domain_alignment": "Relevant domain",

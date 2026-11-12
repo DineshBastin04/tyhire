@@ -50,4 +50,10 @@ def suggest_job_description(title: str, draft_jd_text: str | None) -> dict:
         system = FROM_TITLE_PROMPT
         user_content = f"Job title: {title}"
 
-    return call_tool(system=system, user_content=user_content, tool=SUGGEST_TOOL)
+    # The one caller that opts out of the deterministic default: this is a drafting aid,
+    # and HR clicking "Suggest with AI" a second time on the same title expects another
+    # angle to pick from, not the identical paragraph back. Nothing downstream scores or
+    # compares this text, so variation here costs nothing.
+    return call_tool(
+        system=system, user_content=user_content, tool=SUGGEST_TOOL, temperature=0.8, seed=None
+    )

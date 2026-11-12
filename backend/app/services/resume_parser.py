@@ -1,4 +1,5 @@
-from app.services.openai_client import call_tool
+from app.services import ai_cache
+from app.services.openai_client import MODEL, call_tool
 
 PARSE_PARAMETERS = {
     "type": "object",
@@ -85,9 +86,22 @@ SYSTEM_PROMPT = (
 )
 
 
+# Bump when SYSTEM_PROMPT or PARSE_TOOL changes meaning, so previously cached profiles
+# are not served under a prompt that would now extract something different.
+PROMPT_VERSION = 1
+
+
 def parse_resume(resume_text: str) -> dict:
+    """Memoized on the resume text: the same file re-uploaded must parse to the same
+    profile, or the score computed from it drifts even when scoring itself is pinned."""
+    key = ai_cache.make_key(
+        "resume_parse",
+        {"text": resume_text, "model": MODEL, "prompt_version": PROMPT_VERSION},
+    )
     return call_tool(
         system=SYSTEM_PROMPT,
         user_content=f"Resume text:\n\n{resume_text}",
         tool=PARSE_TOOL,
+        cache_key=key,
+        cache_kind="resume_parse",
     )
