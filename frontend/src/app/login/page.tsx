@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { postJson } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,7 +19,7 @@ export default function LoginPage() {
     setError(null);
     try {
       await postJson("/auth/login", { email, password });
-      router.push("/jobs");
+      router.push("/dashboard");
     } catch {
       setError("Incorrect email or password.");
     } finally {
@@ -27,7 +28,10 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex flex-1 items-center justify-center px-6">
+    <div className="relative flex flex-1 items-center justify-center px-6">
+      <span className="absolute top-4 right-4">
+        <ThemeToggle />
+      </span>
       <form onSubmit={handleSubmit} className="max-w-sm w-full space-y-4">
         <Image
           src="/logo.png"

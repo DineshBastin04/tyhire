@@ -202,7 +202,7 @@ export default function CandidateDetailPage() {
                   const entry = candidate.score_breakdown?.[cat];
                   if (!entry) return null;
                   return (
-                    <div key={cat} className="border border-zinc-200 rounded-md p-2.5 text-xs bg-white">
+                    <div key={cat} className="border border-zinc-200 rounded-md p-2.5 text-xs bg-surface">
                       <div className="flex justify-between items-center mb-1">
                         <p className="font-semibold capitalize text-zinc-800">{cat}</p>
                         <span className="font-bold text-zinc-900 bg-zinc-100 px-1.5 py-0.2 rounded">

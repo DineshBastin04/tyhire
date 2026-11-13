@@ -16,11 +16,15 @@ class OpenAIToolError(RuntimeError):
     instead of a bare Exception, without swallowing genuinely unexpected bugs."""
 
 
-def call_tool(system: str, user_content, tool: dict) -> dict:
+def call_tool(system: str, user_content, tool: dict, timeout: float | None = None) -> dict:
     """Forces a single function-tool call and returns its parsed arguments dict.
 
     Raises OpenAIToolError on any failure so callers can decide whether to degrade
-    gracefully or propagate."""
+    gracefully or propagate.
+
+    `timeout` (seconds) bounds this one request; left as None it keeps the OpenAI client's
+    own default, so existing callers are unaffected. No retry is attempted here — a caller
+    that wants one must do it itself, deliberately, since every retry is another paid call."""
     try:
         response = client.chat.completions.create(
             model=MODEL,
@@ -30,6 +34,7 @@ def call_tool(system: str, user_content, tool: dict) -> dict:
             ],
             tools=[tool],
             tool_choice={"type": "function", "function": {"name": tool["function"]["name"]}},
+            timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001 - openai raises many error types; normalize them all
         raise OpenAIToolError(f"OpenAI request failed: {exc}") from exc

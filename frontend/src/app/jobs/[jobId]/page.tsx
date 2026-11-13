@@ -1,10 +1,9 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
-import { getScoreLabel } from "@/lib/scoreLabel";
 import JobForm, { type JobPayload } from "@/components/JobForm";
 import CampusBulkUploader from "@/components/CampusBulkUploader";
 import { useDialog } from "@/components/Dialog";
@@ -22,9 +21,14 @@ const BUCKET_COLORS: Record<Bucket, string> = {
   declined: "bucket-declined",
 };
 
+// Mirrors the backend's comparison_max_candidates default (core/config.py). The backend is the
+// hard enforcer; this only drives the UI's "deselect some" feedback before a request is made.
+const COMPARE_MAX = 10;
+
 export default function JobDetailPage() {
   const { prompt } = useDialog();
   const { jobId } = useParams<{ jobId: string }>();
+  const router = useRouter();
   const [job, setJob] = useState<Job | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -32,7 +36,29 @@ export default function JobDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [editing, setEditing] = useState(false);
   const [isCampusBulkOpen, setIsCampusBulkOpen] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const toggleSelected = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set());
+  }
+
+  function startComparison() {
+    const ids = Array.from(selected);
+    if (ids.length < 2 || ids.length > COMPARE_MAX) return;
+    router.push(`/jobs/${jobId}/compare?ids=${ids.join(",")}`);
+  }
 
   const refresh = useCallback(() => {
     getJson<Job>(`/jobs/${jobId}`)
@@ -143,21 +169,70 @@ export default function JobDetailPage() {
             value={uploadSource}
             onChange={(e) => setUploadSource(e.target.value)}
             placeholder="Source (optional): referral, LinkedIn…"
-            className="input w-56 bg-white"
+            className="input w-56 bg-surface"
           />
           <button onClick={handleUpload} disabled={uploading} className="btn-primary">
             {uploading ? "Processing…" : "Upload resumes"}
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setIsCampusBulkOpen(true)}
-          className="btn-outline border-indigo-300 text-indigo-800 bg-indigo-50/60 hover:bg-indigo-100 flex items-center gap-1.5 text-xs font-semibold px-3 py-2"
-        >
-          🎓 Campus Bulk Drive Screening
-        </button>
+        <div className="flex items-center gap-2">
+          {!selectMode ? (
+            <button
+              type="button"
+              onClick={() => setSelectMode(true)}
+              className="btn-outline text-xs font-semibold px-3 py-2"
+            >
+              ⚖️ Compare candidates
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={exitSelectMode}
+              className="btn-outline text-xs font-semibold px-3 py-2"
+            >
+              Cancel compare
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setIsCampusBulkOpen(true)}
+            className="btn-outline border-indigo-300 text-indigo-800 bg-indigo-50/60 hover:bg-indigo-100 flex items-center gap-1.5 text-xs font-semibold px-3 py-2"
+          >
+            🎓 Campus Bulk Drive Screening
+          </button>
+        </div>
       </div>
+
+      {selectMode && (
+        <div className="sticky top-0 z-10 border border-blue-300 bg-blue-50 rounded-md p-3 flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-sm text-blue-900">
+            <span className="font-semibold">{selected.size}</span> selected
+            {selected.size > COMPARE_MAX && (
+              <span className="text-red-700 ml-2">
+                — too many. Compare up to {COMPARE_MAX} at once; deselect {selected.size - COMPARE_MAX}.
+              </span>
+            )}
+            {selected.size < 2 && (
+              <span className="text-blue-700 ml-2">— pick at least 2 candidates to compare.</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {selected.size > 0 && (
+              <button onClick={() => setSelected(new Set())} className="btn-outline text-xs px-2 py-1">
+                Clear
+              </button>
+            )}
+            <button
+              onClick={startComparison}
+              disabled={selected.size < 2 || selected.size > COMPARE_MAX}
+              className="btn-primary text-xs px-3 py-1.5"
+            >
+              Compare {selected.size >= 2 && selected.size <= COMPARE_MAX ? `(${selected.size})` : ""}
+            </button>
+          </div>
+        </div>
+      )}
 
       <CampusBulkUploader
         jobId={jobId}
@@ -207,7 +282,13 @@ export default function JobDetailPage() {
               </h2>
               <div className="space-y-2">
                 {inBucket.map((c) => (
-                  <CandidateCard key={c.id} candidate={c} />
+                  <CandidateCard
+                    key={c.id}
+                    candidate={c}
+                    selectMode={selectMode}
+                    selected={selected.has(c.id)}
+                    onToggle={toggleSelected}
+                  />
                 ))}
                 {inBucket.length === 0 && (
                   <p className="text-xs opacity-60">No candidates here yet.</p>
@@ -267,26 +348,30 @@ export default function JobDetailPage() {
   );
 }
 
-function CandidateCard({ candidate }: { candidate: Candidate }) {
+function CandidateCard({
+  candidate,
+  selectMode,
+  selected,
+  onToggle,
+}: {
+  candidate: Candidate;
+  selectMode: boolean;
+  selected: boolean;
+  onToggle: (id: string) => void;
+}) {
   const effectiveBucket = candidate.override_bucket ?? candidate.bucket;
 
-  return (
-    <Link
-      href={`/candidates/${candidate.id}`}
-      className="block bg-white border border-zinc-200 rounded-md p-2.5 text-sm hover:border-zinc-300 hover:shadow-sm transition space-y-1.5"
-    >
+  const cardBody = (
+    <>
       <div className="flex justify-between items-start">
         <span className="font-medium text-zinc-900 leading-tight">
           {candidate.full_name ?? candidate.email ?? "Unnamed candidate"}
         </span>
         <span className="text-xs font-semibold text-zinc-700 bg-zinc-100 px-1.5 py-0.5 rounded shrink-0 ml-2">
-          {candidate.fit_score !== null
-            ? `${candidate.fit_score.toFixed(0)}/100`
-            : "—"}
+          {candidate.fit_score !== null ? `${candidate.fit_score.toFixed(0)}/100` : "—"}
         </span>
       </div>
 
-      {/* Dual Score Badges */}
       {(candidate.technical_score !== null || candidate.communication_score !== null) && (
         <div className="flex items-center gap-1.5 text-[11px]">
           {candidate.technical_score !== null && (
@@ -302,7 +387,6 @@ function CandidateCard({ candidate }: { candidate: Candidate }) {
         </div>
       )}
 
-      {/* Skill & Profession chips summary */}
       {candidate.skills_breakdown && candidate.skills_breakdown.relevant_skills.length > 0 && (
         <div className="text-[11px] text-emerald-700 flex items-center gap-1">
           <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
@@ -325,6 +409,39 @@ function CandidateCard({ candidate }: { candidate: Candidate }) {
       {candidate.override_bucket && (
         <p className="text-xs text-zinc-500">Overridden to {effectiveBucket}</p>
       )}
+    </>
+  );
+
+  // In compare mode the whole card is a selection toggle, not a navigation link — so a
+  // recruiter building a comparison set never accidentally leaves the pipeline.
+  if (selectMode) {
+    return (
+      <button
+        type="button"
+        onClick={() => onToggle(candidate.id)}
+        aria-pressed={selected}
+        className={`w-full text-left bg-surface border rounded-md p-2.5 text-sm transition space-y-1.5 flex gap-2 ${
+          selected ? "border-blue-500 ring-1 ring-blue-400" : "border-zinc-200 hover:border-zinc-300"
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          readOnly
+          tabIndex={-1}
+          className="mt-0.5 shrink-0 pointer-events-none"
+        />
+        <div className="flex-1 space-y-1.5">{cardBody}</div>
+      </button>
+    );
+  }
+
+  return (
+    <Link
+      href={`/candidates/${candidate.id}`}
+      className="block bg-surface border border-zinc-200 rounded-md p-2.5 text-sm hover:border-zinc-300 hover:shadow-sm transition space-y-1.5"
+    >
+      {cardBody}
     </Link>
   );
 }

@@ -396,7 +396,7 @@ export default function JobForm({
           <input
             value={requiredSkills}
             onChange={(e) => setRequiredSkills(e.target.value)}
-            className="input bg-white"
+            className="input bg-surface"
             placeholder="Python, AWS, PostgreSQL"
           />
         </Field>
@@ -405,7 +405,7 @@ export default function JobForm({
             <input
               value={coreSkills}
               onChange={(e) => setCoreSkills(e.target.value)}
-              className="input bg-white text-xs"
+              className="input bg-surface text-xs"
               placeholder="FastAPI, Docker, SQL"
             />
           </Field>
@@ -413,7 +413,7 @@ export default function JobForm({
             <input
               value={secondarySkills}
               onChange={(e) => setSecondarySkills(e.target.value)}
-              className="input bg-white text-xs"
+              className="input bg-surface text-xs"
               placeholder="Redis, Kubernetes, GraphQL"
             />
           </Field>
@@ -422,7 +422,7 @@ export default function JobForm({
           <input
             value={irrelevantSkills}
             onChange={(e) => setIrrelevantSkills(e.target.value)}
-            className="input bg-white text-xs"
+            className="input bg-surface text-xs"
             placeholder="Photoshop, Graphic Design, WordPress"
           />
         </Field>
@@ -529,7 +529,7 @@ export default function JobForm({
                 max={100}
                 value={campusMinCgpa}
                 onChange={(e) => setCampusMinCgpa(e.target.value)}
-                className="input bg-white text-xs"
+                className="input bg-surface text-xs"
                 placeholder="e.g. 7.5 (or 70%)"
               />
             </Field>
@@ -539,7 +539,7 @@ export default function JobForm({
                 min={0}
                 value={campusMaxBacklogs}
                 onChange={(e) => setCampusMaxBacklogs(e.target.value)}
-                className="input bg-white text-xs"
+                className="input bg-surface text-xs"
                 placeholder="e.g. 0"
               />
             </Field>
@@ -547,7 +547,7 @@ export default function JobForm({
               <input
                 value={campusAllowedBatches}
                 onChange={(e) => setCampusAllowedBatches(e.target.value)}
-                className="input bg-white text-xs"
+                className="input bg-surface text-xs"
                 placeholder="2025, 2026"
               />
             </Field>
@@ -555,7 +555,7 @@ export default function JobForm({
               <input
                 value={campusAllowedBranches}
                 onChange={(e) => setCampusAllowedBranches(e.target.value)}
-                className="input bg-white text-xs"
+                className="input bg-surface text-xs"
                 placeholder="CSE, IT, ECE, EEE"
               />
             </Field>

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { getJson, postJson } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 
 export default function SiteHeader() {
   const pathname = usePathname();
@@ -35,9 +36,12 @@ export default function SiteHeader() {
     // White, not the old solid dark-blue bar — the logo's wordmark is dark navy on a
     // white background, so a dark header would make it unreadable. A bottom border does
     // the separation job the solid fill used to.
-    <header className="bg-white border-b border-zinc-200 px-6 py-2 flex items-center gap-6">
+    <header className="bg-surface border-b border-zinc-200 px-6 py-2 flex items-center gap-6">
       <Link href="/" className="shrink-0">
         <Image src="/logo.png" alt="TyHire" width={160} height={61} priority className="h-9 w-auto" />
+      </Link>
+      <Link href="/dashboard" className="text-sm text-zinc-600 hover:text-blue-900">
+        Dashboard
       </Link>
       <Link href="/jobs" className="text-sm text-zinc-600 hover:text-blue-900">
         Jobs
@@ -53,6 +57,7 @@ export default function SiteHeader() {
       </Link>
       <span className="ml-auto flex items-center gap-3">
         {email && <span className="text-xs text-zinc-400">{email}</span>}
+        <ThemeToggle />
         <button onClick={handleLogout} className="text-sm text-zinc-600 hover:text-blue-900">
           Log out
         </button>
