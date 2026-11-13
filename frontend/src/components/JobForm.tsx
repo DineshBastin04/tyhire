@@ -360,11 +360,18 @@ export default function JobForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      <Field label="Title">
+      <p className="text-xs text-zinc-500">
+        <span className="text-red-600" aria-hidden="true">
+          *
+        </span>{" "}
+        required. Every other field can be left exactly as it is.
+      </p>
+
+      <Field label="Title" required>
         <input required value={title} onChange={(e) => setTitle(e.target.value)} className="input" />
       </Field>
 
-      <Field label="Job description">
+      <Field label="Job description" required>
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-zinc-500">
             Paste your own JD, or leave blank and let AI draft one from the title.
@@ -692,10 +699,36 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  required,
+  children,
+}: {
+  label: string;
+  /** Marks a field the form will not submit without — only title and job description,
+   * which are the two the API rejects when blank (schemas/job.py). Everything else
+   * defaults to an explicit "(Optional)" rather than to no marker at all: an unmarked
+   * field reads as "nobody said", which is the ambiguity this is here to remove. */
+  required?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <label className="block">
-      <span className="block text-sm font-medium mb-1">{label}</span>
+      <span className="block text-sm font-medium mb-1">
+        {label}
+        {required ? (
+          <>
+            {/* The asterisk is decorative: colour and a glyph carry no meaning to a
+              * screen reader, so the word itself is announced instead. */}
+            <span className="text-red-600 ml-0.5" aria-hidden="true">
+              *
+            </span>
+            <span className="sr-only"> (required)</span>
+          </>
+        ) : (
+          <span className="ml-1 text-xs font-normal text-zinc-500">(Optional)</span>
+        )}
+      </span>
       {children}
     </label>
   );
