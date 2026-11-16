@@ -396,6 +396,27 @@ docker compose up -d
 > `### YYYY-MM-DD — <title>` then what / why / files / verification.
 > Keep entries atomic; add one whenever code, schema, infra, config, or deployment changes.
 
+### 2026-11-16 — TYH-004: Score not shown after overriding a rejected candidate to approved
+- **What:** When HR overrides a candidate to **approved/review**, the backend now computes the
+  AI fit score on the spot if the candidate was never scored.
+- **Why (root cause):** Knockout-failed candidates are declined **at upload without ever being
+  AI-scored** (`fit_score` stays NULL — `upload_resumes`: `if failed: bucket="declined"`, no
+  scoring). The `/override` endpoint only flipped `override_bucket`, so a force-approved
+  knockout candidate had no number and the Job-details card showed "—". (Normally-scored
+  declined candidates already have a `fit_score`, so they were never affected.)
+- **How:** New `_ensure_scored(candidate, db)` helper in `candidates.py` — if `fit_score is
+  None` and a `parsed_profile` exists, it runs `scoring.score_candidate` once and stores
+  fit/technical/communication/reasons/breakdown/skills/profession_fit. `override_candidate`
+  calls it when the target bucket isn't `declined`. The underlying AI `bucket` is left as-is
+  (the knockout genuinely failed; HR's decision rides on `override_bucket`); this only fills in
+  the missing score. A scoring/AI failure is logged and swallowed so the override itself never
+  fails — the score simply stays "—" as before. Audit log records `scored_on_override`.
+- **Files:** `backend/app/api/v1/candidates.py` (logger, `_ensure_scored`, override wiring).
+  Frontend needs no change — the Job-details card already renders `fit_score`/Tech/Comm once
+  non-null, and the override handler `refresh()`es the candidate.
+- **Verification:** `py_compile` clean. Backend auto-reloads via WatchFiles. Pending HR manual
+  test: override a knockout-declined candidate to approved → score + Tech/Comm now appear.
+
 ### 2026-11-16 — TYH-003: Email Dispatched without an address + configurable SMTP/email sending
 - **What:** Closed the bug *and* built the real email-sending backend it exposed.
   1. **Validation (the bug).** "Email Dispatched" could fire with no recipient. The interviewer
