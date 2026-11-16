@@ -6,7 +6,6 @@ import { useCallback, useEffect, useState } from "react";
 import { BASE_URL, deleteJson, getJson, postJson } from "@/lib/api";
 import { getIntegrityScoreBand } from "@/lib/integrityLabel";
 import { getScoreLabel } from "@/lib/scoreLabel";
-import { lpaToRupees, rupeesToLpaInput } from "@/lib/salary";
 import { useDialog } from "@/components/Dialog";
 import L1AudioUploader from "@/components/L1AudioUploader";
 import type { Bucket, Candidate, InterviewSession } from "@/lib/types";
@@ -37,14 +36,6 @@ export default function CandidateDetailPage() {
 
   async function handleManualAdjustment(adjustment: number, reason: string) {
     await postJson(`/candidates/${candidateId}/manual-adjustment`, { adjustment, reason });
-    refresh();
-  }
-
-  async function handleScreeningDetails(noticePeriodDays: number | null, expectedSalary: number | null) {
-    await postJson(`/candidates/${candidateId}/screening-details`, {
-      notice_period_days: noticePeriodDays,
-      expected_salary: expectedSalary,
-    });
     refresh();
   }
 
@@ -489,10 +480,6 @@ export default function CandidateDetailPage() {
         </Section>
       )}
 
-      <Section title="Screening details">
-        <ScreeningDetailsForm candidate={candidate} onSubmit={handleScreeningDetails} />
-      </Section>
-
       <Section title="HR decision">
         <OverrideForm candidate={candidate} onSubmit={handleOverride} />
         <div className="mt-3 pt-3 border-t border-zinc-100">
@@ -639,54 +626,6 @@ function ManualAdjustmentForm({
           Apply
         </button>
       </div>
-    </div>
-  );
-}
-
-function ScreeningDetailsForm({
-  candidate,
-  onSubmit,
-}: {
-  candidate: Candidate;
-  onSubmit: (noticePeriodDays: number | null, expectedSalary: number | null) => void;
-}) {
-  const [noticePeriod, setNoticePeriod] = useState(
-    candidate.notice_period_days != null ? String(candidate.notice_period_days) : ""
-  );
-  // LPA in the box, rupees on the wire — the same unit the job's band is entered in, so
-  // the knockout compares like with like.
-  const [expectedSalary, setExpectedSalary] = useState(
-    rupeesToLpaInput(candidate.expected_salary)
-  );
-
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="number"
-        min={0}
-        value={noticePeriod}
-        onChange={(e) => setNoticePeriod(e.target.value)}
-        placeholder="Notice (days)"
-        className="text-xs border border-zinc-300 rounded px-2 py-0.5 w-28"
-      />
-      <input
-        type="number"
-        min={0}
-        step="any"
-        value={expectedSalary}
-        onChange={(e) => setExpectedSalary(e.target.value)}
-        placeholder="Expected salary (LPA)"
-        className="text-xs border border-zinc-300 rounded px-2 py-0.5 flex-1"
-      />
-      <button
-        type="button"
-        onClick={() =>
-          onSubmit(noticePeriod ? Number(noticePeriod) : null, lpaToRupees(expectedSalary))
-        }
-        className="btn-outline text-xs px-2 py-1"
-      >
-        Save
-      </button>
     </div>
   );
 }
