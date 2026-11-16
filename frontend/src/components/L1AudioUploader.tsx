@@ -178,7 +178,7 @@ export default function L1AudioUploader({
 
       {/* Active Screening Details */}
       {activeScreening && (
-        <div className="border border-zinc-200 rounded-lg p-4 bg-white space-y-4 shadow-sm">
+        <div className="border border-zinc-200 rounded-lg p-4 bg-surface space-y-4 shadow-sm">
           {/* Header & Verdict */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 pb-3">
             <div>

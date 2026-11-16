@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 
@@ -22,6 +23,8 @@ from app.services import dedupe, experience, knockout, scoring, storage, triage
 from app.services.fit_report import build_fit_report_pdf
 from app.services.resume_parser import parse_resume
 from app.services.text_extract import extract_text
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["candidates"], dependencies=[Depends(require_hr_auth)])
 
@@ -49,6 +52,46 @@ def _apply_bucket_from_score(candidate: Candidate, job: Job) -> None:
     effective = (candidate.fit_score or 0) + (candidate.manual_score_adjustment or 0)
     effective = max(0.0, min(100.0, effective))
     candidate.bucket = triage.bucket_for_score(effective, job)
+
+
+def _ensure_scored(candidate: Candidate, db: Session) -> bool:
+    """Compute and store the AI fit score for a candidate that was never scored.
+
+    Knockout-failed candidates are declined at upload time *without* an AI score (fit_score
+    stays NULL), so when HR overrides them to approved/review the UI has no number to show
+    (TYH-004). This scores such a candidate once, on demand, from its already-parsed profile.
+    The underlying AI `bucket` is left untouched — the knockout genuinely failed and HR's
+    decision rides on `override_bucket`; this only fills in the missing score.
+
+    Returns True if a score was computed and stored. A scoring failure is swallowed (logged)
+    so the override itself never fails because of an AI/network error.
+    """
+    if candidate.fit_score is not None or not candidate.parsed_profile:
+        return False
+    job = db.get(Job, candidate.job_id)
+    if not job:
+        return False
+    try:
+        (
+            score,
+            tech_score,
+            comm_score,
+            score_reasons,
+            breakdown,
+            skills_breakdown,
+            profession_fit,
+        ) = scoring.score_candidate(candidate.parsed_profile, job)
+    except Exception:  # noqa: BLE001 - never block the override on an AI/network failure
+        logger.exception("On-override scoring failed for candidate %s", candidate.id)
+        return False
+    candidate.fit_score = score
+    candidate.technical_score = tech_score
+    candidate.communication_score = comm_score
+    candidate.score_reasons = score_reasons
+    candidate.score_breakdown = breakdown
+    candidate.skills_breakdown = skills_breakdown
+    candidate.profession_fit = profession_fit
+    return True
 
 
 @router.post("/jobs/{job_id}/resumes", response_model=list[CandidateOut])
@@ -365,13 +408,24 @@ def override_candidate(
 
     candidate.override_bucket = payload.bucket
     candidate.override_reason = payload.reason
+
+    # When HR pulls a never-scored (knockout-failed) candidate into approved/review, compute
+    # the AI score now so the UI shows a real number instead of "—" (TYH-004).
+    scored_now = False
+    if payload.bucket.value != "declined":
+        scored_now = _ensure_scored(candidate, db)
+
     db.add(candidate)
 
     db.add(AuditLog(
         candidate_id=candidate.id,
         actor=f"hr:{current_hr_user['email']}",
         action="override_bucket",
-        detail={"bucket": payload.bucket.value, "reason": payload.reason},
+        detail={
+            "bucket": payload.bucket.value,
+            "reason": payload.reason,
+            "scored_on_override": scored_now,
+        },
     ))
 
     db.commit()

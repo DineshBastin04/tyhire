@@ -12,8 +12,12 @@ import type { Bucket, Candidate, InterviewSession } from "@/lib/types";
 
 const CATEGORIES = ["skills", "experience", "education", "certifications", "communication"] as const;
 
+// Mirrors the backend bound (api/v1/candidates.py MANUAL_ADJUSTMENT_LIMIT); the server is
+// still the source of truth, this just drives the input hints and client-side guard.
+const MANUAL_ADJUSTMENT_LIMIT = 20;
+
 export default function CandidateDetailPage() {
-  const { prompt } = useDialog();
+  const { prompt, toast } = useDialog();
   const { candidateId } = useParams<{ candidateId: string }>();
   const router = useRouter();
   const [candidate, setCandidate] = useState<Candidate | null>(null);
@@ -34,24 +38,57 @@ export default function CandidateDetailPage() {
     refresh();
   }, [refresh]);
 
+  function showError(err: unknown, fallback: string) {
+    toast({
+      variant: "error",
+      message: err instanceof Error && err.message ? err.message : fallback,
+    });
+  }
+
   async function handleManualAdjustment(adjustment: number, reason: string) {
-    await postJson(`/candidates/${candidateId}/manual-adjustment`, { adjustment, reason });
-    refresh();
+    // Validate client-side so an out-of-range value gives immediate, friendly feedback
+    // instead of a round-trip that 400s — the backend still enforces the same bound.
+    if (!Number.isFinite(adjustment) || adjustment < -MANUAL_ADJUSTMENT_LIMIT || adjustment > MANUAL_ADJUSTMENT_LIMIT) {
+      toast({
+        variant: "error",
+        message: `HR score adjustment must be between -${MANUAL_ADJUSTMENT_LIMIT} and +${MANUAL_ADJUSTMENT_LIMIT}.`,
+      });
+      return;
+    }
+    try {
+      await postJson(`/candidates/${candidateId}/manual-adjustment`, { adjustment, reason });
+      toast({ variant: "success", message: "Score adjustment applied." });
+      refresh();
+    } catch (err) {
+      showError(err, "Could not apply the score adjustment.");
+    }
   }
 
   async function handleOverride(bucket: Bucket, reason: string) {
-    await postJson(`/candidates/${candidateId}/override`, { bucket, reason });
-    refresh();
+    try {
+      await postJson(`/candidates/${candidateId}/override`, { bucket, reason });
+      refresh();
+    } catch (err) {
+      showError(err, "Could not override the decision.");
+    }
   }
 
   async function handleArchive(reason: string) {
-    await postJson(`/candidates/${candidateId}/archive`, { reason });
-    refresh();
+    try {
+      await postJson(`/candidates/${candidateId}/archive`, { reason });
+      refresh();
+    } catch (err) {
+      showError(err, "Could not archive the candidate.");
+    }
   }
 
   async function handleUnarchive() {
-    await postJson(`/candidates/${candidateId}/unarchive`, {});
-    refresh();
+    try {
+      await postJson(`/candidates/${candidateId}/unarchive`, {});
+      refresh();
+    } catch (err) {
+      showError(err, "Could not unarchive the candidate.");
+    }
   }
 
   async function handleHardDelete(name: string) {
@@ -65,34 +102,49 @@ export default function CandidateDetailPage() {
       danger: true,
     });
     if (!reason || !candidate) return;
-    await deleteJson(`/candidates/${candidateId}`, { reason });
-    router.push(`/jobs/${candidate.job_id}`);
+    try {
+      await deleteJson(`/candidates/${candidateId}`, { reason });
+      router.push(`/jobs/${candidate.job_id}`);
+    } catch (err) {
+      showError(err, "Could not delete the candidate.");
+    }
   }
 
   async function handleDownloadFitReport() {
     // Fetched as a blob (not a plain <a href>) so the HR session cookie is reliably sent —
     // same reasoning as the review page's recording playback.
-    const res = await fetch(`${BASE_URL}/candidates/${candidateId}/fit-report`, { credentials: "include" });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const disposition = res.headers.get("Content-Disposition") ?? "";
-    const filename = /filename="?([^"]+)"?/.exec(disposition)?.[1] ?? "fit_report.pdf";
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const res = await fetch(`${BASE_URL}/candidates/${candidateId}/fit-report`, { credentials: "include" });
+      if (!res.ok) {
+        toast({ variant: "error", message: "Could not generate the fit report." });
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const filename = /filename="?([^"]+)"?/.exec(disposition)?.[1] ?? "fit_report.pdf";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showError(err, "Could not download the fit report.");
+    }
   }
 
   async function handleScheduleInterview() {
     if (!candidate) return;
-    const session = await postJson<InterviewSession>("/interviews", {
-      candidate_name: candidate.full_name ?? candidate.email ?? "Candidate",
-      job_id: candidate.job_id,
-      candidate_id: candidate.id,
-    });
-    setInterviewSession(session);
+    try {
+      const session = await postJson<InterviewSession>("/interviews", {
+        candidate_name: candidate.full_name ?? candidate.email ?? "Candidate",
+        job_id: candidate.job_id,
+        candidate_id: candidate.id,
+      });
+      setInterviewSession(session);
+    } catch (err) {
+      showError(err, "Could not schedule the interview.");
+    }
   }
 
   if (notFound) {
@@ -108,6 +160,14 @@ export default function CandidateDetailPage() {
   if (!candidate) return <p className="p-6 text-zinc-500">Loading…</p>;
 
   const effectiveBucket = candidate.override_bucket ?? candidate.bucket;
+  // Effective fit = pure AI score + HR manual adjustment, clamped 0-100. This is the number
+  // the buckets are derived from (see backend _apply_bucket_from_score), so the headline
+  // must show it too — otherwise applying an HR adjustment leaves the displayed score
+  // unchanged and the feature reads as broken (TYH-002). fit_score itself is never mutated.
+  const effectiveFit =
+    candidate.fit_score != null
+      ? Math.max(0, Math.min(100, candidate.fit_score + (candidate.manual_score_adjustment ?? 0)))
+      : null;
   const latestSession = sessions[0] ?? null;
 
   return (
@@ -144,12 +204,19 @@ export default function CandidateDetailPage() {
               <div className="border border-zinc-200 bg-zinc-50/70 rounded-md p-3 text-center">
                 <p className="text-xs text-zinc-500 font-medium">Overall Fit</p>
                 <p className="text-2xl font-bold text-zinc-900 mt-0.5">
-                  {candidate.fit_score.toFixed(0)}
+                  {(effectiveFit ?? candidate.fit_score).toFixed(0)}
                   <span className="text-xs font-normal text-zinc-400">/100</span>
                 </p>
                 <p className="text-[11px] text-zinc-600 font-medium mt-0.5">
-                  {getScoreLabel(candidate.fit_score)}
+                  {getScoreLabel(effectiveFit ?? candidate.fit_score)}
                 </p>
+                {candidate.manual_score_adjustment ? (
+                  <p className="text-[10px] text-zinc-400 mt-0.5">
+                    AI {candidate.fit_score.toFixed(0)} · HR{" "}
+                    {candidate.manual_score_adjustment > 0 ? "+" : ""}
+                    {candidate.manual_score_adjustment}
+                  </p>
+                ) : null}
               </div>
 
               <div className="border border-blue-200 bg-blue-50/50 rounded-md p-3 text-center">
@@ -194,7 +261,7 @@ export default function CandidateDetailPage() {
                   const entry = candidate.score_breakdown?.[cat];
                   if (!entry) return null;
                   return (
-                    <div key={cat} className="border border-zinc-200 rounded-md p-2.5 text-xs bg-white">
+                    <div key={cat} className="border border-zinc-200 rounded-md p-2.5 text-xs bg-surface">
                       <div className="flex justify-between items-center mb-1">
                         <p className="font-semibold capitalize text-zinc-800">{cat}</p>
                         <span className="font-bold text-zinc-900 bg-zinc-100 px-1.5 py-0.2 rounded">
@@ -601,12 +668,14 @@ function ManualAdjustmentForm({
 
   return (
     <div className="space-y-1 pt-2 border-t border-zinc-100">
-      <p className="font-medium text-xs">HR score adjustment (±20, e.g. competing offer)</p>
+      <p className="font-medium text-xs">
+        HR score adjustment (±{MANUAL_ADJUSTMENT_LIMIT}, e.g. competing offer)
+      </p>
       <div className="flex items-center gap-2">
         <input
           type="number"
-          min={-20}
-          max={20}
+          min={-MANUAL_ADJUSTMENT_LIMIT}
+          max={MANUAL_ADJUSTMENT_LIMIT}
           value={adjustment}
           onChange={(e) => setAdjustment(e.target.value)}
           className="text-xs border border-zinc-300 rounded px-2 py-0.5 w-20"

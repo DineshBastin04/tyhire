@@ -69,6 +69,7 @@ from app.services import (
     integrity,
     proctoring_blocklist as proctoring_blocklist_hints,
     sentiment_aggregate,
+    smtp_settings,
     storage,
     video_provider,
 )
@@ -91,6 +92,10 @@ from app.services.consolidated_report import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Pragmatic email shape check (not full RFC 5322) — enough to reject blank/placeholder input
+# on the send-consolidated-report path (TYH-003); real deliverability is the mail server's job.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # In-memory buffer for real-time live transcription stream during active calls
 _live_transcripts: dict[str, list[dict]] = {}
@@ -1292,11 +1297,20 @@ def trigger_send_consolidated_report(
     db: Session = Depends(get_db),
 ):
     """Dispatches the consolidated scorecard and PDF report to the interviewer."""
-    recipient = payload.recipient_email or "interviewer@company.com"
+    # TYH-003: a real recipient is required — previously this fell back to a placeholder
+    # ("interviewer@company.com") when none was given, so the report reported itself as
+    # "dispatched" even though no address had been entered.
+    recipient = (payload.recipient_email or "").strip()
+    if not recipient or not _EMAIL_RE.match(recipient):
+        raise HTTPException(status_code=422, detail="A valid recipient email address is required.")
     try:
         return send_consolidated_report(db, session_id, recipient)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except smtp_settings.SmtpNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except smtp_settings.SmtpSendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.get("/{session_id}/consolidated-report/pdf")

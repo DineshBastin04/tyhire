@@ -42,6 +42,7 @@ def call_tool(
     seed: int | None = DEFAULT_SEED,
     cache_key: str | None = None,
     cache_kind: str = "tool",
+    timeout: float | None = None,
 ) -> dict:
     """Forces a single function-tool call and returns its parsed arguments dict.
 
@@ -55,7 +56,11 @@ def call_tool(
     something that is never byte-identical twice anyway — a frame, a voice clip.
 
     Raises OpenAIToolError on any failure so callers can decide whether to degrade
-    gracefully or propagate."""
+    gracefully or propagate.
+
+    `timeout` (seconds) bounds this one request; left as None it keeps the OpenAI client's
+    own default, so existing callers are unaffected. No retry is attempted here — a caller
+    that wants one must do it itself, deliberately, since every retry is another paid call."""
     if cache_key:
         cached = ai_cache.get(cache_key)
         if cached is not None:
@@ -72,6 +77,7 @@ def call_tool(
             tool_choice={"type": "function", "function": {"name": tool["function"]["name"]}},
             temperature=temperature,
             **({"seed": seed} if seed is not None else {}),
+            timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001 - openai raises many error types; normalize them all
         raise OpenAIToolError(f"OpenAI request failed: {exc}") from exc

@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
+import { ApiError, BASE_URL, getJson, postForm, postJson } from "@/lib/api";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
 import { createFaceSignalDetector } from "@/lib/faceDetection";
 import { detectAiExtensionArtifacts, detectProctoringTamper } from "@/lib/extensionDetection";
@@ -963,7 +963,7 @@ function InterviewRecorder({
         // open from an earlier run) — retrying forever every 3s is pointless, so this one
         // case gives up instead of re-queuing. Any other failure (network blip) still
         // re-queues for the next tick, same as before.
-        if (err instanceof Error && err.message.includes("409")) return;
+        if (err instanceof ApiError && err.status === 409) return;
         pendingSignals.current.unshift(...batch);
       });
     }, 3000);

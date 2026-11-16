@@ -130,7 +130,7 @@ export default function CampusBulkUploader({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full border border-zinc-200 overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="bg-surface rounded-xl shadow-2xl max-w-xl w-full border border-zinc-200 overflow-hidden flex flex-col max-h-[90vh]">
         {/* Modal Header */}
         <div className="p-4 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/70">
           <div>

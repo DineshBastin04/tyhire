@@ -30,6 +30,19 @@ interface NotifyOptions {
   okLabel?: string;
 }
 
+type ToastVariant = "error" | "success" | "info";
+
+interface ToastOptions {
+  message: string;
+  variant?: ToastVariant;
+  /** Auto-dismiss delay in ms. Defaults to 4500; pass 0 to require manual dismissal. */
+  duration?: number;
+}
+
+interface ToastItem extends ToastOptions {
+  id: number;
+}
+
 type DialogState =
   | { kind: "confirm"; options: ConfirmOptions; resolve: (value: boolean) => void }
   | { kind: "prompt"; options: PromptOptions; resolve: (value: string | null) => void }
@@ -43,6 +56,8 @@ interface DialogContextValue {
   prompt: (options: PromptOptions) => Promise<string | null>;
   /** Replaces window.alert — resolves once dismissed. */
   notify: (options: NotifyOptions) => Promise<void>;
+  /** Non-blocking transient notification (e.g. an error after a failed action). */
+  toast: (options: ToastOptions) => void;
 }
 
 const DialogContext = createContext<DialogContextValue | null>(null);
@@ -56,6 +71,20 @@ export function useDialog(): DialogContextValue {
 export function DialogProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DialogState>(null);
   const [inputValue, setInputValue] = useState("");
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((current) => current.filter((t) => t.id !== id));
+  }, []);
+
+  const toast = useCallback((options: ToastOptions) => {
+    const id = Date.now() + Math.random();
+    setToasts((current) => [...current, { id, ...options }]);
+    const duration = options.duration ?? 4500;
+    if (duration > 0 && typeof window !== "undefined") {
+      window.setTimeout(() => dismissToast(id), duration);
+    }
+  }, [dismissToast]);
 
   const confirm = useCallback((options: ConfirmOptions) => {
     return new Promise<boolean>((resolve) => {
@@ -109,8 +138,37 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   }, [state, cancel]);
 
   return (
-    <DialogContext.Provider value={{ confirm, prompt, notify }}>
+    <DialogContext.Provider value={{ confirm, prompt, notify, toast }}>
       {children}
+      {toasts.length > 0 && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2 w-80 max-w-[calc(100vw-2rem)]">
+          {toasts.map((t) => {
+            const variant = t.variant ?? "info";
+            const tone =
+              variant === "error"
+                ? "bg-red-50 border-red-300 text-red-800"
+                : variant === "success"
+                ? "bg-emerald-50 border-emerald-300 text-emerald-800"
+                : "bg-zinc-50 border-zinc-300 text-zinc-800";
+            return (
+              <div
+                key={t.id}
+                role="alert"
+                className={`flex items-start gap-2 rounded-md border shadow-sm p-3 text-sm ${tone}`}
+              >
+                <span className="flex-1 whitespace-pre-wrap break-words">{t.message}</span>
+                <button
+                  onClick={() => dismissToast(t.id)}
+                  aria-label="Dismiss"
+                  className="shrink-0 leading-none text-base opacity-60 hover:opacity-100"
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {state && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -119,7 +177,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
           <div
             role="dialog"
             aria-modal="true"
-            className="bg-white rounded-md shadow-lg max-w-sm w-full p-5 space-y-3"
+            className="bg-surface rounded-md shadow-lg max-w-sm w-full p-5 space-y-3"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-sm font-semibold text-zinc-900">{state.options.title}</h2>
