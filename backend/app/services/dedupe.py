@@ -39,5 +39,11 @@ def find_duplicate(db: Session, job_id: uuid.UUID, email: str | None, phone: str
     return None
 
 
-def _normalize_phone(phone: str) -> str:
+def _normalize_phone(phone: str | None) -> str:
+    # Many resumes have no phone (parser returns None), and this runs for the new candidate
+    # and every existing one before the `phone and candidate.phone` guard below — so a None
+    # here must yield "" rather than being iterated over (which raised
+    # "'NoneType' object is not iterable" and failed the whole resume at upload).
+    if not phone:
+        return ""
     return "".join(ch for ch in phone if ch.isdigit())[-10:]

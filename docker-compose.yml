@@ -10,8 +10,8 @@ services:
     command: >
       -n
       --listening-port=3478
-      --min-port=49160
-      --max-port=49200
+      --min-port=40000
+      --max-port=40040
       --realm=${TURN_DOMAIN:-localhost}
       --use-auth-secret
       --static-auth-secret=${TURN_SECRET:?Set TURN_SECRET in .env (e.g. openssl rand -hex 32) — must match the backend's TURN_SECRET}
@@ -19,7 +19,7 @@ services:
     ports:
       - "3478:3478"
       - "3478:3478/udp"
-      - "49160-49200:49160-49200/udp"
+      - "40000-40040:40000-40040/udp"
     healthcheck:
       # coturn/coturn doesn't ship `nc` — use bash's /dev/tcp instead of relying on netcat.
       test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/3478' || exit 1"]

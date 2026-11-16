@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.candidate import AuditLog, Candidate
 from app.models.job import Job
 from app.models.interview import IdentityCheck, IntegrityFlag, InterviewSession
+from app.services import smtp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,25 @@ def send_consolidated_report(db: Session, session_id: uuid.UUID, recipient_email
     report = build_consolidated_report(db, session_id)
     pdf_bytes = build_consolidated_report_pdf(report)
 
-    # Log report transmission to audit trail
+    candidate_name = report.get("candidate_name") or "the candidate"
+    body = (
+        f"Consolidated interview evaluation for {candidate_name}.\n\n"
+        f"Overall fit score: {report.get('fit_score')}\n"
+        f"Integrity score: {report.get('integrity_score')}\n\n"
+        f"The full evaluation scorecard is attached as a PDF.\n\n"
+        f"— TyHire"
+    )
+
+    # Actually email the report (TYH-003). Raises SmtpNotConfiguredError / SmtpSendError, which
+    # the API layer turns into a clear 409/502 — the audit row is written only after a real send
+    # succeeds, so "report sent" in the log/audit trail never overstates what happened.
+    smtp_settings.send_email(
+        to_email=recipient_email,
+        subject=f"Interview Evaluation — {candidate_name}",
+        body_text=body,
+        attachments=[(f"evaluation_{session_id}.pdf", pdf_bytes, "application", "pdf")],
+    )
+
     db.add(
         AuditLog(
             interview_session_id=session_id,
@@ -241,7 +260,7 @@ def send_consolidated_report(db: Session, session_id: uuid.UUID, recipient_email
     )
     db.commit()
 
-    logger.info("Consolidated report generated and dispatched to %s for session %s", recipient_email, session_id)
+    logger.info("Consolidated report emailed to %s for session %s", recipient_email, session_id)
 
     return {
         "status": "sent",
