@@ -9,6 +9,7 @@ from app.api.v1 import (
     jobs,
     l1_screening,
     oauth,
+    settings,
     signaling,
 )
 
@@ -22,3 +23,4 @@ api_router.include_router(comparison.router)
 api_router.include_router(interviews.router)
 api_router.include_router(signaling.router)
 api_router.include_router(l1_screening.router)
+api_router.include_router(settings.router)

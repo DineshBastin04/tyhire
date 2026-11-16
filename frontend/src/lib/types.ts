@@ -384,6 +384,59 @@ export interface CandidateComparisonResponse {
   ai_error: string | null;
 }
 
+// ---- SMTP / email settings -------------------------------------------------------------
+export type EmailAccount = "gmail" | "outlook";
+
+export interface GmailSlotStatus {
+  configured: boolean;
+  sender_email: string | null;
+  from_name: string | null;
+  host: string | null;
+  port: number | null;
+  use_tls: boolean;
+  has_password: boolean;
+}
+
+export interface OutlookSlotStatus {
+  configured: boolean;
+  sender_email: string | null;
+  from_name: string | null;
+  tenant_id: string | null;
+  client_id: string | null;
+  has_client_secret: boolean;
+}
+
+export interface SmtpConfigStatus {
+  active: EmailAccount | null;
+  gmail: GmailSlotStatus;
+  outlook: OutlookSlotStatus;
+}
+
+export interface GmailSlotIn {
+  sender_email: string;
+  from_name?: string | null;
+  /** Blank keeps the previously saved password. */
+  password: string;
+  host?: string | null;
+  port?: number | null;
+  use_tls: boolean;
+}
+
+export interface OutlookSlotIn {
+  sender_email: string;
+  from_name?: string | null;
+  tenant_id?: string | null;
+  client_id?: string | null;
+  /** Blank keeps the previously saved client secret. */
+  client_secret: string;
+}
+
+export interface SmtpConfigIn {
+  active: EmailAccount | null;
+  gmail: GmailSlotIn;
+  outlook: OutlookSlotIn;
+}
+
 export interface BulkUploadBatch {
   id: string;
   job_id: string;

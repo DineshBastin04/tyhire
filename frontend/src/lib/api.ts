@@ -65,6 +65,14 @@ export function postForm<T>(path: string, form: FormData, extraHeaders?: Record<
   return request<T>(path, { method: "POST", body: form, headers: extraHeaders });
 }
 
+export function putJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function patchJson<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, {
     method: "PATCH",

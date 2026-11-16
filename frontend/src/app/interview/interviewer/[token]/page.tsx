@@ -4,11 +4,17 @@ import { useParams } from "next/navigation";
 import Image from "next/image";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { BASE_URL, getJson, postForm, postJson } from "@/lib/api";
+import { useDialog } from "@/components/Dialog";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
 import LiveTranscriptFeed from "@/components/LiveTranscriptFeed";
 import { useLiveSpeech, type LiveTranscriptItem } from "@/lib/useLiveSpeech";
 import { exitFullscreen, isFullscreenActive, requestFullscreen } from "@/lib/fullscreen";
 import type { FacialAffectAnalysis, InterviewSession, LiveSignalEvent, SignalType, VoiceToneAnalysis } from "@/lib/types";
+
+// Pragmatic email shape check — mirrors the backend guard on /send-report (TYH-003).
+function isValidEmail(value: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
+}
 
 interface SentimentSample {
   session_offset_ms: number;
@@ -113,6 +119,7 @@ export default function InterviewerCapturePage() {
   const [emailSent, setEmailSent] = useState(false);
   const [emailRecipient, setEmailRecipient] = useState("");
   const [closeFailed, setCloseFailed] = useState(false);
+  const { toast } = useDialog();
 
   // Manual test utterance input
   const [manualUtterance, setManualUtterance] = useState("");
@@ -390,14 +397,25 @@ export default function InterviewerCapturePage() {
 
   async function handleSendEmailReport() {
     if (!session) return;
+    const recipient = emailRecipient.trim();
+    // TYH-003: never dispatch without a valid recipient. The button is already disabled for
+    // this, but guard here too so the report can't be "dispatched" to an empty address.
+    if (!isValidEmail(recipient)) {
+      toast({ variant: "error", message: "Enter a valid interviewer email address before sending." });
+      return;
+    }
     setSendingEmail(true);
     try {
       await postJson(`/interviews/${session.id}/send-report`, {
-        recipient_email: emailRecipient.trim() || undefined,
+        recipient_email: recipient,
       });
       setEmailSent(true);
+      toast({ variant: "success", message: `Report dispatched to ${recipient}.` });
     } catch (err) {
-      alert("Failed to send report: " + (err instanceof Error ? err.message : "Network error"));
+      toast({
+        variant: "error",
+        message: err instanceof Error && err.message ? err.message : "Failed to send the report.",
+      });
     } finally {
       setSendingEmail(false);
     }
@@ -1082,12 +1100,15 @@ export default function InterviewerCapturePage() {
                 />
                 <button
                   onClick={handleSendEmailReport}
-                  disabled={sendingEmail || emailSent}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 disabled:text-zinc-400 text-white font-bold text-xs rounded-lg shadow-xs transition-all"
+                  disabled={sendingEmail || emailSent || !isValidEmail(emailRecipient)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-200 disabled:text-zinc-400 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg shadow-xs transition-all"
                 >
                   {sendingEmail ? "Sending…" : emailSent ? "✓ Email Dispatched" : "📧 Send Scorecard"}
                 </button>
               </div>
+              {emailRecipient.trim() && !isValidEmail(emailRecipient) && !emailSent && (
+                <p className="text-xs text-red-600">Enter a valid email address (e.g. name@company.com).</p>
+              )}
               {emailSent && (
                 <p className="text-xs text-emerald-700 font-semibold">
                   ✓ Consolidated evaluation report and PDF summary dispatched to interviewer!

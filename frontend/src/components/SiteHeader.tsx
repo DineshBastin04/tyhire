@@ -55,6 +55,9 @@ export default function SiteHeader() {
       <Link href="/settings/users" className="text-sm text-zinc-600 hover:text-blue-900">
         HR Users
       </Link>
+      <Link href="/settings/email" className="text-sm text-zinc-600 hover:text-blue-900">
+        Email settings
+      </Link>
       <span className="ml-auto flex items-center gap-3">
         {email && <span className="text-xs text-zinc-400">{email}</span>}
         <ThemeToggle />

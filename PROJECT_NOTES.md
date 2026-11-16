@@ -396,6 +396,44 @@ docker compose up -d
 > `### YYYY-MM-DD — <title>` then what / why / files / verification.
 > Keep entries atomic; add one whenever code, schema, infra, config, or deployment changes.
 
+### 2026-11-16 — TYH-003: Email Dispatched without an address + configurable SMTP/email sending
+- **What:** Closed the bug *and* built the real email-sending backend it exposed.
+  1. **Validation (the bug).** "Email Dispatched" could fire with no recipient. The interviewer
+     report page now blocks Send until the address is a valid email (`isValidEmail` guard +
+     disabled button + inline hint), and the backend `POST /interviews/.../send-report`
+     rejects a blank/invalid recipient with 422 and no longer falls back to a hardcoded
+     `interviewer@company.com`.
+  2. **Configurable email sender.** New **Email settings** window (header nav → `/settings/email`,
+     HR-auth only) where HR/admin configure **two** sender accounts at once — a **Gmail / SMTP**
+     slot (STARTTLS app password) and a **Microsoft 365 / Outlook** slot (Graph API app-only
+     client-credentials: tenant id / client id / client secret, Mail.Send app permission) — with
+     an **active-sender** toggle picking which one sends.
+  3. **Test connection** per account: sends a short "This is a test. Connection successful."
+     mail to a prompted recipient (defaults to the sender), with success/error toasters.
+  4. **Error handling**: provider failures surface as typed errors → toasts (SMTP auth 401/
+     config 409 / send 502), never a crash overlay.
+- **Why:** Reports had no working delivery path and could be "dispatched" to nothing. HR needed
+  to supply real credentials for their own Gmail + Outlook tenants from inside the app.
+- **Storage/security:** Config is a JSON file at `/storage/smtp_config.json` (not `.env` —
+  Docker never mounts `.env` writable; the storage volume is bind-mounted and read at send
+  time, so changes apply with no restart). Secrets (SMTP password, Graph client secret) are
+  **Fernet-encrypted at rest** with `STORAGE_ENCRYPTION_KEY` when set. `get_status` never
+  returns secrets (only `has_password` / `has_client_secret` flags). A `_migrate()` upgrades
+  the earlier single-slot config to the two-slot shape so saved accounts aren't lost.
+- **Files:**
+  - Backend (new): `app/services/smtp_settings.py` (two-slot config, Fernet, SMTP + Graph send),
+    `app/schemas/settings.py`, `app/api/v1/settings.py` (`GET/PUT /settings/smtp`,
+    `POST /settings/smtp/test`); wired in `app/api/v1/__init__.py`.
+  - Backend (mod): `app/api/v1/interviews.py` (recipient validation, typed errors, no fallback),
+    `app/services/consolidated_report.py` (send PDF via `smtp_settings.send_email`).
+  - Frontend (new): `src/app/settings/email/page.tsx`. (mod) `src/lib/types.ts` (SMTP types),
+    `src/lib/api.ts` (`ApiError`, `putJson`), `src/components/SiteHeader.tsx` (nav link),
+    `src/app/interview/interviewer/[token]/page.tsx` (email validation),
+    `next.config.ts` (`allowedDevOrigins` for localhost/127.0.0.1 dev resources).
+- **Verification:** backend `py_compile` clean; frontend `tsc --noEmit` 0 errors; eslint clean
+  on all changed files (pre-existing call-timer lint on the interviewer page untouched). User
+  manually confirmed **both Gmail and Outlook test mails deliver** to a real inbox.
+
 ### 2026-11-16 — TYH-002: HR score adjustment not reflected + no error handling
 - **What:** Two fixes on the candidate ATS profile (`candidates/[candidateId]`):
   1. **Score now reflects the adjustment.** "Overall Fit" showed the raw AI `fit_score`, so
