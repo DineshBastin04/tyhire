@@ -396,6 +396,33 @@ docker compose up -d
 > `### YYYY-MM-DD — <title>` then what / why / files / verification.
 > Keep entries atomic; add one whenever code, schema, infra, config, or deployment changes.
 
+### 2026-11-16 — TYH-002: HR score adjustment not reflected + no error handling
+- **What:** Two fixes on the candidate ATS profile (`candidates/[candidateId]`):
+  1. **Score now reflects the adjustment.** "Overall Fit" showed the raw AI `fit_score`, so
+     applying an HR adjustment left the headline number unchanged (read as "not working"). It
+     now shows the **effective score** = `fit_score + manual_score_adjustment` (clamped 0–100,
+     the same number the buckets already use), with an `AI 55 · HR +10` sub-line. `fit_score`
+     itself is **not** mutated (kept pure for audit + the comparison feature).
+  2. **Proper error handling.** An out-of-range adjustment (±20) 400'd and surfaced as a
+     Next.js runtime crash overlay (the mutation handlers had no `try/catch`). Added a reusable
+     **toast** (`useDialog().toast`), a **client-side range guard** (friendly red toast, no
+     round-trip), success feedback, and `try/catch` → error toast on **every** mutation on the
+     page (adjustment, override, archive/unarchive, screening details, delete, fit-report,
+     schedule interview).
+- **Why:** Reported by QA (Subash & Sriram), High/High. Root cause was display-only + missing
+  error handling; the backend `set_manual_adjustment` was already correct.
+- **Scope note:** Frontend-only. No backend/schema change. The API client now throws a typed
+  **`ApiError`** (parses the backend `{"detail": …}` into a clean `message`, keeps `status`), so
+  error displays app-wide get the readable reason; updated the one format-dependent consumer
+  (interview signals 409 handling) to use `err.status`. Toast renders **top-center**.
+- **Files:** `frontend/src/app/candidates/[candidateId]/page.tsx`,
+  `frontend/src/components/Dialog.tsx` (toast), `frontend/src/lib/api.ts` (`ApiError`),
+  `frontend/src/app/interview/[token]/page.tsx` (409 → `err.status`).
+- **Verification:** `tsc --noEmit` clean; `eslint` clean on all 4 changed files (the interview
+  page's 8 lint errors are **pre-existing**, on untouched lines). Manually retested & approved
+  by the user after `docker compose restart frontend`: out-of-range → red toast (no overlay);
+  valid → green toast + headline moves; `0` → reverts to pure AI score.
+
 ### 2026-10-30 — Comparison: surface candidate scores prominently
 - **What:** In the candidate comparison, the résumé scores are now a **bold headline per
   candidate** instead of mid-table rows. Each candidate column header shows the effective **Fit
