@@ -19,7 +19,7 @@ from app.schemas.candidate import (
     OverrideRequest,
     ScreeningDetailsRequest,
 )
-from app.services import dedupe, knockout, scoring, storage, triage
+from app.services import dedupe, experience, knockout, scoring, storage, triage
 from app.services.fit_report import build_fit_report_pdf
 from app.services.resume_parser import parse_resume
 from app.services.text_extract import extract_text
@@ -152,6 +152,15 @@ async def upload_resumes(
             candidate.phone = profile.get("phone")
             candidate.notice_period_days = profile.get("notice_period_days")
             candidate.expected_salary = profile.get("expected_salary")
+            candidate.experience_analysis = experience.analyze_experience(profile)
+
+            # Candidates added earlier in THIS batch are still pending: the session is
+            # created with autoflush=False, so the query inside find_duplicate would only
+            # see rows from previous uploads. Without this flush, uploading the same person
+            # twice in one batch scored both copies independently — and because scoring is
+            # not deterministic, the same resume came back with two different results.
+            # Flushing also assigns their primary keys, which is_duplicate_of needs below.
+            db.flush()
 
             duplicate = dedupe.find_duplicate(
                 db, job_id, candidate.email, candidate.phone, candidate.full_name

@@ -143,6 +143,13 @@ class JobArchiveRequest(BaseModel):
     reason: str
 
 
+class JobDeleteRequest(BaseModel):
+    # Optional: a job that is already archived carries an archive reason of its own, and
+    # the delete is confirmed in the UI either way. Only used when the delete has to
+    # archive the job on the caller's behalf first.
+    reason: Optional[str] = None
+
+
 class JobSuggestRequest(BaseModel):
     title: str
     draft_jd_text: Optional[str] = None

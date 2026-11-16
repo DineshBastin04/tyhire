@@ -8,7 +8,7 @@ import { useDialog } from "@/components/Dialog";
 import WebRTCRoom, { type WebRTCApi } from "@/components/WebRTCRoom";
 import LiveTranscriptFeed from "@/components/LiveTranscriptFeed";
 import { useLiveSpeech, type LiveTranscriptItem } from "@/lib/useLiveSpeech";
-import { exitFullscreen, isFullscreenActive, requestFullscreen } from "@/lib/fullscreen";
+import { exitFullscreen, isFullscreenActive, onFullscreenChange } from "@/lib/fullscreen";
 import type { FacialAffectAnalysis, InterviewSession, LiveSignalEvent, SignalType, VoiceToneAnalysis } from "@/lib/types";
 
 // Pragmatic email shape check — mirrors the backend guard on /send-report (TYH-003).
@@ -71,9 +71,11 @@ const SIGNAL_LABELS: Record<SignalType, string> = {
   devtools_open: "Browser DevTools possibly open",
   screen_share_partial: "Shared a tab/window, not full screen",
   screen_share_stopped: "Stopped screen sharing",
+  screen_share_never: "Never shared their screen",
   location_mismatch: "IP location doesn't match stated location",
   ai_extension_detected: "AI answer-helper browser extension detected",
   teleprompter_reading: "Teleprompter / Script-reading eye motion pattern",
+  proctoring_tamper_detected: "Extension interfering with proctoring (focus/visibility faked)",
 };
 
 const DECISION_OPTIONS: { value: "proceed" | "concern" | "reject"; label: string; className: string }[] = [
@@ -81,6 +83,34 @@ const DECISION_OPTIONS: { value: "proceed" | "concern" | "reject"; label: string
   { value: "concern", label: "Some concern", className: "bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-sm" },
   { value: "reject", label: "Reject", className: "bg-red-600 hover:bg-red-700 text-white font-medium shadow-sm" },
 ];
+
+/** Signals that shouldn't wait for the post-interview review. These are the ones that
+ * indicate active assistance rather than ordinary nervous behaviour — a glance off-screen
+ * or a brief focus loss stays in the Signals tab, where it belongs. */
+const CRITICAL_SIGNAL_TYPES: Set<SignalType> = new Set([
+  "unauthorized_app_detected",
+  "ai_extension_detected",
+  "proctoring_tamper_detected",
+  "virtual_camera",
+  "second_face",
+  "second_voice",
+  "voice_mismatch",
+  "external_display_detected",
+  "teleprompter_reading",
+]);
+
+/** Names the offending application where the detector reported one — "an unauthorised app
+ * is running" is far less actionable than knowing it is Interview Coder. */
+function describeCriticalSignal(signal: LiveSignalEvent): string {
+  const label = SIGNAL_LABELS[signal.signal_type] ?? signal.signal_type;
+  const apps = signal.meta?.apps;
+  if (Array.isArray(apps) && apps.length > 0) {
+    return `${label}: ${apps.map(String).join(", ")}`;
+  }
+  const reason = signal.meta?.reason;
+  if (typeof reason === "string" && reason) return `${label} — ${reason}`;
+  return label;
+}
 
 function formatOffset(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
@@ -96,6 +126,7 @@ export default function InterviewerCapturePage() {
   const [recording, setRecording] = useState(false);
   const [stopped, setStopped] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
+  const [recordingWarning, setRecordingWarning] = useState<string | null>(null);
   const [liveSignals, setLiveSignals] = useState<LiveSignalEvent[]>([]);
   const [sentimentSamples, setSentimentSamples] = useState<SentimentSample[]>([]);
   const [decision, setDecision] = useState<"proceed" | "concern" | "reject" | null>(null);
@@ -126,10 +157,24 @@ export default function InterviewerCapturePage() {
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Consecutive failed chunk uploads. One is ordinary — the backend restarting, a blip,
+  // or the last chunk racing the page unload when the call ends. A run of them means the
+  // interviewer's audio track is actually losing material, which they should know before
+  // they rely on the transcript.
+  const chunkFailuresRef = useRef(0);
   const webrtcApiRef = useRef<WebRTCApi | null>(null);
   const [micMuted, setMicMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [muteRequestSent, setMuteRequestSent] = useState(false);
+  const [screenShareRequestSent, setScreenShareRequestSent] = useState(false);
+  const [isFullscreenOn, setIsFullscreenOn] = useState(false);
+  // Toasts raised over the call itself. The banner above the grid is the standing record;
+  // this is what actually catches the eye of someone looking at the candidate rather than
+  // at the page furniture.
+  const [alertToasts, setAlertToasts] = useState<{ key: string; text: string }[]>([]);
+  // Signals already toasted. The live feed is re-fetched whole every 3s, so without this
+  // every poll would re-raise the same alert forever.
+  const toastedSignalsRef = useRef<Set<string>>(new Set());
   const [callEnded, setCallEnded] = useState(false);
   const [joined, setJoined] = useState(false);
   const [callStartTime, setCallStartTime] = useState<number>(Date.now());
@@ -204,6 +249,27 @@ export default function InterviewerCapturePage() {
     const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
   }, [session, callEnded]);
+
+  // Raises a toast over the call the first time each serious signal appears. Keyed on
+  // type + offset because the feed is replaced wholesale on every poll — identity has to
+  // come from the event itself, not from its position in the array.
+  useEffect(() => {
+    const fresh = liveSignals
+      .filter((s) => CRITICAL_SIGNAL_TYPES.has(s.signal_type))
+      .map((s) => ({ key: `${s.signal_type}:${s.session_offset_ms}`, text: describeCriticalSignal(s) }))
+      .filter((t) => !toastedSignalsRef.current.has(t.key));
+
+    if (fresh.length === 0) return;
+    fresh.forEach((t) => toastedSignalsRef.current.add(t.key));
+    setAlertToasts((prev) => [...prev, ...fresh].slice(-3));
+
+    // Long enough to read mid-conversation without having to break off; the banner and
+    // the Signals tab keep it afterwards, so nothing is lost when it goes.
+    const timer = setTimeout(() => {
+      setAlertToasts((prev) => prev.filter((p) => !fresh.some((f) => f.key === p.key)));
+    }, 15000);
+    return () => clearTimeout(timer);
+  }, [liveSignals]);
 
   // Live sentiment polling
   useEffect(() => {
@@ -328,6 +394,8 @@ export default function InterviewerCapturePage() {
   async function startRecording() {
     if (!session) return;
     setMicError(null);
+    setRecordingWarning(null);
+    chunkFailuresRef.current = 0;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -336,9 +404,28 @@ export default function InterviewerCapturePage() {
         if (e.data.size === 0) return;
         const form = new FormData();
         form.append("chunk", e.data, "chunk.webm");
-        await postForm(`/interviews/${session.id}/interviewer-recording-chunk`, form, {
-          "X-Interviewer-Token": session.interviewer_join_token ?? "",
-        });
+        // Every periodic upload in this app is best-effort (see the candidate page and
+        // useLiveSpeech), and this one has to be too: it is an async DOM event handler, so
+        // a rejection here has nowhere to go but an unhandled promise rejection — which in
+        // dev is a full-screen "Failed to fetch" overlay thrown over a live interview,
+        // every 5 seconds, for a dropped audio chunk. The upload fires again in 5s anyway,
+        // and `stop()` on End Call flushes a final chunk whose request is routinely
+        // cancelled by the page tearing down, which is not an error worth showing at all.
+        try {
+          await postForm(`/interviews/${session.id}/interviewer-recording-chunk`, form, {
+            "X-Interviewer-Token": session.interviewer_join_token ?? "",
+          });
+          chunkFailuresRef.current = 0;
+          setRecordingWarning(null);
+        } catch {
+          chunkFailuresRef.current += 1;
+          // ~15s of consecutive loss before saying anything, so a single blip stays quiet.
+          if (chunkFailuresRef.current >= 3) {
+            setRecordingWarning(
+              "Your audio recording isn't reaching the server — the saved interview audio may be incomplete."
+            );
+          }
+        }
       };
       recorder.start(5000);
       recorderRef.current = recorder;
@@ -349,14 +436,25 @@ export default function InterviewerCapturePage() {
   }
 
   function endCall(notifyPeer = true) {
+    // Told first, while the connection is still up — the message can't be delivered once
+    // the tracks and socket below are gone.
     if (notifyPeer) {
       webrtcApiRef.current?.notifyPeerEnded();
     }
+
+    // Two independent captures have to be released, and both are released here rather
+    // than left to component teardown: unmounting WebRTCRoom also stops its devices, but
+    // only on a later render, so the camera light lingered after the button was pressed.
+    webrtcApiRef.current?.stopMedia();
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+
     setRecording(false);
     setStopped(true);
     if (isFullscreenActive()) exitFullscreen().catch(() => {});
+    // Also what stops the live-speech capture, which is gated on !callEnded.
     setCallEnded(true);
     setTimeout(loadConsolidatedReport, 1000);
   }
@@ -378,6 +476,22 @@ export default function InterviewerCapturePage() {
 
   function toggleCamera() {
     setCameraOff(webrtcApiRef.current?.toggleCamera() ?? false);
+  }
+
+  function toggleFullscreen() {
+    setIsFullscreenOn(webrtcApiRef.current?.toggleFullscreen() ?? false);
+  }
+
+  // Keeps the button's label accurate if fullscreen is exited via Esc rather than the
+  // button itself — isFullscreenOn would otherwise stay stuck on "Exit Fullscreen".
+  useEffect(() => onFullscreenChange(() => setIsFullscreenOn(isFullscreenActive())), []);
+
+  function requestScreenShare() {
+    // Only a prompt on their side, never a share: getDisplayMedia needs a user gesture in
+    // the candidate's own browser, so they still choose what (and whether) to share.
+    webrtcApiRef.current?.requestPeerScreenShare();
+    setScreenShareRequestSent(true);
+    setTimeout(() => setScreenShareRequestSent(false), 3000);
   }
 
   function requestMute() {
@@ -449,6 +563,7 @@ export default function InterviewerCapturePage() {
   }
 
   const latestSentiment = sentimentSamples.length > 0 ? sentimentSamples[0] : null;
+  const criticalSignals = liveSignals.filter((s) => CRITICAL_SIGNAL_TYPES.has(s.signal_type));
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-50 text-zinc-900 font-sans">
@@ -532,7 +647,10 @@ export default function InterviewerCapturePage() {
 
             <button
               onClick={() => {
-                requestFullscreen().catch(() => {});
+                // Deliberately NOT auto-fullscreening the whole page here — that swallowed
+                // the AI Questions/Transcript/Sentiment/Signals tabs and decision bar along
+                // with the video, with no way back short of Esc. WebRTCRoom's own fullscreen
+                // button now targets just the video+screenshare area instead.
                 setCallStartTime(Date.now());
                 setJoined(true);
                 startRecording();
@@ -544,11 +662,89 @@ export default function InterviewerCapturePage() {
           </div>
         </div>
       ) : (
-        /* Main Command Center Layout */
+        <>
+        {/* Live proctoring alert. Deliberately outside the tab panels: these were only
+            visible inside the Signals tab, and during a live call the interviewer is
+            almost always on AI Questions — so "the candidate is running an AI assistant
+            right now" sat behind a tab nobody was looking at and was first noticed in the
+            post-interview review. Serious signals now interrupt wherever you are. */}
+        {criticalSignals.length > 0 && (
+          <div className="px-4 pt-3 max-w-[1600px] w-full mx-auto">
+            <div className="rounded-xl border-2 border-red-400 bg-red-50 shadow-sm overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-4 py-2 bg-red-100/70 border-b border-red-200">
+                <span className="flex items-center gap-2 text-sm font-bold text-red-800">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-600" />
+                  </span>
+                  Detected during this interview ({criticalSignals.length})
+                </span>
+                <button
+                  onClick={() => setActiveTab("proctoring")}
+                  className="text-[11px] font-bold text-red-700 underline hover:text-red-900 shrink-0"
+                >
+                  Open the full signal feed
+                </button>
+              </div>
+              <ul className="divide-y divide-red-200/70 max-h-32 overflow-y-auto">
+                {criticalSignals
+                  .slice()
+                  .reverse()
+                  .slice(0, 4)
+                  .map((s, i) => (
+                    <li key={i} className="flex items-center justify-between gap-3 px-4 py-1.5 text-xs">
+                      <span className="text-red-900 font-medium">{describeCriticalSignal(s)}</span>
+                      <span className="text-[10px] text-red-500 font-mono shrink-0">
+                        {formatOffset(s.session_offset_ms)}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+              <p className="px-4 py-1.5 text-[11px] text-red-700 bg-red-100/50 border-t border-red-200">
+                The candidate has been asked on their own screen to close it. Nothing is
+                auto-rejected — raise it in the call, or leave it for review.
+              </p>
+            </div>
+          </div>
+        )}
+        {/* Main Command Center Layout */}
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 max-w-[1600px] w-full mx-auto">
           {/* Left Column: Two-Part Video/Screenshare & Active Question / Then-and-There Decision */}
           <div className="lg:col-span-7 flex flex-col gap-3">
-            <div className="relative w-full h-[450px] bg-surface rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
+            <div className="relative w-full h-[450px] bg-white rounded-xl overflow-hidden border border-zinc-200 shadow-sm p-1.5">
+              {/* Alert toasts, over the call itself. Placed here rather than at the edge of
+                  the page on purpose: during an interview the interviewer is watching the
+                  candidate, and anything outside this box goes unread until afterwards. */}
+              {alertToasts.length > 0 && (
+                <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 w-[min(32rem,92%)] space-y-2 pointer-events-none">
+                  {alertToasts.map((toast) => (
+                    <div
+                      key={toast.key}
+                      className="pointer-events-auto flex items-start gap-2.5 rounded-xl border border-red-700 bg-red-600 px-3.5 py-2.5 text-white shadow-2xl ring-2 ring-red-500/40"
+                    >
+                      <span className="relative flex h-2.5 w-2.5 mt-1 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-red-100">
+                          External tool detected
+                        </p>
+                        <p className="text-xs font-semibold leading-snug break-words">{toast.text}</p>
+                      </div>
+                      <button
+                        onClick={() =>
+                          setAlertToasts((prev) => prev.filter((t) => t.key !== toast.key))
+                        }
+                        aria-label="Dismiss"
+                        className="shrink-0 text-red-100 hover:text-white text-sm font-bold leading-none px-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {!callEnded ? (
                 <WebRTCRoom
                   sessionId={session.id}
@@ -653,8 +849,40 @@ export default function InterviewerCapturePage() {
               </div>
             )}
 
-            {/* In-Call Action Toolbar */}
-            <div className="flex flex-wrap items-center justify-between bg-surface border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
+            {/* In-Call Action Toolbar — gone once the call is over. Leaving it up implied
+                the call was still live, and "Start Audio Record" would genuinely re-open
+                the microphone after the interview had ended. */}
+            {callEnded ? (
+              <div className="bg-white border border-zinc-200 rounded-xl p-4 shadow-xs space-y-3">
+                <p className="text-sm font-semibold text-emerald-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                  Interview ended — camera, microphone and recording are all off.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setShowScorecard(true)}
+                    className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs"
+                  >
+                    View Consolidated Scorecard
+                  </button>
+                  {closeFailed ? (
+                    <span className="text-xs text-zinc-500">
+                      Your browser won&apos;t let a page close a tab it didn&apos;t open —
+                      close this one yourself when you&apos;re done. Nothing is still
+                      recording.
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleCloseTab}
+                      className="px-3.5 py-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-bold border border-zinc-200"
+                    >
+                      Close this tab
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+            <div className="flex flex-wrap items-center justify-between bg-white border border-zinc-200 rounded-xl p-2.5 gap-2 shadow-xs">
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
@@ -677,6 +905,21 @@ export default function InterviewerCapturePage() {
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-50 border border-zinc-200 hover:bg-zinc-100 text-zinc-700 transition-all"
                 >
                   {muteRequestSent ? "✓ Request Sent" : "Ask Candidate to Mute"}
+                </button>
+                <button
+                  onClick={requestScreenShare}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-50 border border-zinc-200 hover:bg-zinc-100 text-zinc-700 transition-all"
+                  title="Prompts the candidate to share their screen — they choose what to share"
+                >
+                  {screenShareRequestSent ? "✓ Request Sent" : "🖥️ Ask to Share Screen"}
+                </button>
+                <button
+                  onClick={toggleFullscreen}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                    isFullscreenOn ? "bg-blue-50 border-blue-200 text-blue-700" : "bg-zinc-50 border-zinc-200 text-zinc-700 hover:bg-zinc-100"
+                  }`}
+                >
+                  {isFullscreenOn ? "⛶ Exit Fullscreen" : "⛶ Fullscreen"}
                 </button>
               </div>
 
@@ -702,8 +945,16 @@ export default function InterviewerCapturePage() {
                 </button>
               </div>
             </div>
+            )}
 
-            {micError && <p className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">{micError}</p>}
+            {micError && !callEnded && (
+              <p className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">{micError}</p>
+            )}
+            {recordingWarning && !callEnded && (
+              <p className="text-xs text-amber-700 bg-amber-50 p-2 rounded border border-amber-200">
+                {recordingWarning}
+              </p>
+            )}
           </div>
 
           {/* Right Column: AI Intelligence & Live Telemetry Tabs */}
@@ -737,10 +988,19 @@ export default function InterviewerCapturePage() {
               <button
                 onClick={() => setActiveTab("proctoring")}
                 className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  activeTab === "proctoring" ? "bg-surface text-blue-700 shadow-xs border border-zinc-200/60" : "text-zinc-600 hover:text-zinc-900"
+                  activeTab === "proctoring"
+                    ? "bg-white text-blue-700 shadow-xs border border-zinc-200/60"
+                    : criticalSignals.length > 0
+                    ? "text-red-700 font-bold"
+                    : "text-zinc-600 hover:text-zinc-900"
                 }`}
               >
                 🛡️ Signals ({liveSignals.length})
+                {criticalSignals.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold align-middle">
+                    {criticalSignals.length}
+                  </span>
+                )}
               </button>
               <button
                 onClick={() => setActiveTab("evaluation")}
@@ -1019,6 +1279,7 @@ export default function InterviewerCapturePage() {
             </div>
           </div>
         </main>
+        </>
       )}
 
       {/* Post-Meeting Consolidated Scorecard Modal */}

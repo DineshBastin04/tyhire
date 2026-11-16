@@ -6,16 +6,31 @@ import type { IceServer } from "@/lib/types";
 import { LiveKitRoom, RoomAudioRenderer, useTracks, VideoTrack } from "@livekit/components-react";
 import { Track, Room, RoomEvent } from "livekit-client";
 import EyeTrackingOverlay from "@/components/EyeTrackingOverlay";
+import { exitFullscreen, isFullscreenActive, requestFullscreen } from "@/lib/fullscreen";
 
 export interface WebRTCApi {
   /** Toggles the local mic; returns the new muted state. */
   toggleMic: () => boolean;
   /** Toggles the local camera; returns the new camera-off state. */
   toggleCamera: () => boolean;
+  /** Toggles fullscreen on just the call+screenshare box (not the whole page) — returns
+   * the new fullscreen state. The page's own controls (mute/decision panel/tabs) stay
+   * reachable by exiting fullscreen (this again, or Esc) rather than being hidden away. */
+  toggleFullscreen: () => boolean;
   /** Interviewer-only: asks the candidate's page to mute itself. */
   requestPeerMute: () => void;
+  /** Interviewer-only: asks the candidate's page to start sharing their screen. The
+   * candidate's browser will only open the picker from their own click, never from this
+   * message — getDisplayMedia requires a user gesture — so this surfaces a prompt on
+   * their side rather than starting a share. */
+  requestPeerScreenShare: () => void;
   /** Tells the other participant's page the call is over from this end. */
   notifyPeerEnded: () => void;
+  /** Releases the camera and microphone immediately — the device light goes out and the
+   * OS sees them as free. Unmounting this component does the same thing, but that only
+   * happens on a later render; "End call" has to mean the devices are off at the moment
+   * it is pressed, not shortly afterwards. Safe to call more than once. */
+  stopMedia: () => void;
 }
 
 interface WebRTCRoomProps {
@@ -26,6 +41,7 @@ interface WebRTCRoomProps {
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  onScreenShareRequested?: () => void;
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   livekitToken?: string | null;
@@ -47,6 +63,42 @@ function wsBaseUrl(): string {
 
 const DEFAULT_ICE_SERVERS: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
+/** Plain-language reason the camera/mic couldn't be opened, for the person in the call.
+ * A failure here used to be a console warning only, which left an unexplained black
+ * rectangle on both sides — the single least diagnosable state this component has. */
+function mediaErrorMessage(err: unknown, gotAudio: boolean): string {
+  const name = err instanceof DOMException ? err.name : "";
+
+  if (name === "NotReadableError" || name === "TrackStartError") {
+    // By far the most common cause: the device is open somewhere else. On Windows most
+    // webcams can only be held by one capture at a time.
+    return gotAudio
+      ? "Your camera is already in use by another app or browser tab, so you've joined with audio only. Close whatever is using it — including any other interview tab — then rejoin to turn video on."
+      : "Your camera and microphone are already in use by another app or browser tab. Close whatever is using them, then rejoin.";
+  }
+  if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+    return gotAudio
+      ? "Camera access was blocked, so you've joined with audio only. Allow it in the browser prompt and in your computer's privacy settings, then rejoin."
+      : "Camera and microphone access was blocked. Allow it in the browser prompt and in your computer's privacy settings, then rejoin.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return gotAudio
+      ? "No camera was found on this device, so you've joined with audio only."
+      : "No camera or microphone was found on this device.";
+  }
+  return gotAudio
+    ? "Couldn't turn your camera on, so you've joined with audio only."
+    : "Couldn't turn on your camera or microphone.";
+}
+
+/** Tells the peer which incoming video track is the screen share. Without this the
+ * receiving side has to guess from arrival order, and with two video m-lines that order
+ * isn't guaranteed — guessing wrong silently swaps the camera and screen panels. */
+function announceScreenTrack(ws: WebSocket | null, track: MediaStreamTrack, streamId: string) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "screen-track", trackId: track.id, streamId }));
+}
+
 export default function WebRTCRoom({
   sessionId,
   token,
@@ -55,6 +107,7 @@ export default function WebRTCRoom({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onScreenShareRequested,
   onPeerEnded,
   onPeerConnectedChange,
   livekitToken,
@@ -84,12 +137,19 @@ export default function WebRTCRoom({
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteScreenRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [hasRemoteScreen, setHasRemoteScreen] = useState(false);
   const [peerPresent, setPeerPresent] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const extraVideoTrackRef = useRef<MediaStreamTrack | null | undefined>(extraVideoTrack);
   const tracksAddedRef = useRef(false);
+  // What was announced to the peer for the local screen-share track, kept so it can be
+  // re-sent verbatim if the peer joins later (an announcement made to an empty room is
+  // simply dropped by the relay).
+  const announcedScreenRef = useRef<{ trackId: string; streamId: string } | null>(null);
 
   // Stashed streams in case ref is not immediately bound
   const remoteCameraStreamRef = useRef<MediaStream | null>(null);
@@ -101,7 +161,20 @@ export default function WebRTCRoom({
       const senders = pcRef.current.getSenders();
       const alreadyAdded = senders.some((s) => s.track === extraVideoTrack);
       if (!alreadyAdded) {
-        pcRef.current.addTrack(extraVideoTrack, new MediaStream([extraVideoTrack]));
+        const screenStream = new MediaStream([extraVideoTrack]);
+        pcRef.current.addTrack(extraVideoTrack, screenStream);
+        announceScreenTrack(wsRef.current, extraVideoTrack, screenStream.id);
+        announcedScreenRef.current = { trackId: extraVideoTrack.id, streamId: screenStream.id };
+      }
+    }
+    // Only after having actually announced one — otherwise the interviewer side (whose
+    // extraVideoTrack is always null) would fire this on mount and blank the candidate's
+    // panel for a screen share that was never claimed in the first place.
+    if (!extraVideoTrack && announcedScreenRef.current) {
+      announcedScreenRef.current = null;
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "screen-track-ended" }));
       }
     }
   }, [extraVideoTrack]);
@@ -128,6 +201,73 @@ export default function WebRTCRoom({
     // Queue for ICE candidates arriving before setRemoteDescription
     const pendingIceCandidates: RTCIceCandidateInit[] = [];
 
+    // Which remote video track is the screen share, per the peer's own "screen-track"
+    // message (see announceScreenTrack). The announcement and the track itself race each
+    // other over two different channels, so every video track seen is remembered and
+    // re-classified if the announcement lands second.
+    const announcedScreenIds = new Set<string>();
+    const seenVideo = new Map<string, MediaStream>();
+
+    function isScreenTrack(trackId: string, stream: MediaStream): boolean {
+      return announcedScreenIds.has(trackId) || announcedScreenIds.has(stream.id);
+    }
+
+    function attachScreen(stream: MediaStream) {
+      remoteScreenStreamRef.current = stream;
+      if (remoteScreenRef.current) {
+        remoteScreenRef.current.srcObject = stream;
+        remoteScreenRef.current.play().catch(() => {});
+      }
+      setHasRemoteScreen(true);
+    }
+
+    function detachScreen() {
+      remoteScreenStreamRef.current = null;
+      if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
+      setHasRemoteScreen(false);
+    }
+
+    function attachCamera(trackId: string, stream: MediaStream) {
+      remoteCameraTrackId = trackId;
+      remoteCameraStreamRef.current = stream;
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current.play().catch(() => {});
+      }
+    }
+
+    function classifyVideoTrack(trackId: string, stream: MediaStream) {
+      if (isScreenTrack(trackId, stream)) {
+        attachScreen(stream);
+      } else if (!remoteCameraTrackId) {
+        attachCamera(trackId, stream);
+      } else if (trackId !== remoteCameraTrackId) {
+        // Unannounced second video track — the peer is on an older build or the message
+        // was lost; arrival order is the only thing left to go on.
+        attachScreen(stream);
+      }
+    }
+
+    /** Re-runs classification once a late "screen-track" announcement identifies a track
+     * that was already filed (possibly as the camera). */
+    function reclassifyAnnouncedScreen() {
+      for (const [trackId, stream] of seenVideo) {
+        if (!isScreenTrack(trackId, stream)) continue;
+        if (remoteCameraTrackId === trackId) {
+          remoteCameraTrackId = null;
+          remoteCameraStreamRef.current = null;
+          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+          for (const [otherId, otherStream] of seenVideo) {
+            if (otherId !== trackId && !isScreenTrack(otherId, otherStream)) {
+              attachCamera(otherId, otherStream);
+              break;
+            }
+          }
+        }
+        attachScreen(stream);
+      }
+    }
+
     const polite = role === "candidate";
     let makingOffer = false;
     let ignoreOffer = false;
@@ -147,7 +287,18 @@ export default function WebRTCRoom({
           audio: true
         });
       } catch (e) {
-        console.warn("Could not acquire local camera/mic", e);
+        // Losing the camera must not take the microphone down with it. Asking for both at
+        // once is all-or-nothing, so a busy or blocked camera previously left the call with
+        // no media at all — silently, since this was only a console warning. Retry for
+        // audio so the interview can still go ahead, and tell the user what happened.
+        console.warn("Could not acquire camera; retrying audio-only", e);
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          if (!cancelled) setMediaError(mediaErrorMessage(e, true));
+        } catch (audioErr) {
+          console.warn("Could not acquire microphone either", audioErr);
+          if (!cancelled) setMediaError(mediaErrorMessage(audioErr, false));
+        }
       }
 
       if (cancelled) {
@@ -170,7 +321,13 @@ export default function WebRTCRoom({
           localStream.getTracks().forEach((track) => pc!.addTrack(track, localStream!));
         }
         if (extraVideoTrackRef.current) {
-          pc.addTrack(extraVideoTrackRef.current, new MediaStream([extraVideoTrackRef.current]));
+          const screenStream = new MediaStream([extraVideoTrackRef.current]);
+          pc.addTrack(extraVideoTrackRef.current, screenStream);
+          announceScreenTrack(ws, extraVideoTrackRef.current, screenStream.id);
+          announcedScreenRef.current = {
+            trackId: extraVideoTrackRef.current.id,
+            streamId: screenStream.id,
+          };
         }
       }
 
@@ -204,31 +361,15 @@ export default function WebRTCRoom({
           }
         } else if (track.kind === "video") {
           const stream = event.streams[0] || new MediaStream([track]);
-          
-          if (!remoteCameraTrackId) {
-            remoteCameraTrackId = track.id;
-            remoteCameraStreamRef.current = stream;
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = stream;
-              remoteVideoRef.current.play().catch(() => {});
-            }
-          } else if (track.id !== remoteCameraTrackId) {
-            // Second video track received is the screenshare
-            remoteScreenStreamRef.current = stream;
-            if (remoteScreenRef.current) {
-              remoteScreenRef.current.srcObject = stream;
-              remoteScreenRef.current.play().catch(() => {});
-            }
-            setHasRemoteScreen(true);
-          }
+          seenVideo.set(track.id, stream);
+          classifyVideoTrack(track.id, stream);
 
           track.onunmute = () => {
-            if (track.id !== remoteCameraTrackId) {
-              setHasRemoteScreen(true);
-              if (remoteScreenRef.current) {
-                remoteScreenRef.current.srcObject = stream;
-                remoteScreenRef.current.play().catch(() => {});
-              }
+            // Re-attach on unmute rather than re-deciding: a track's role doesn't change,
+            // and re-running the guess here is what previously let a screen share land in
+            // the camera panel after a brief mute.
+            if (isScreenTrack(track.id, stream)) {
+              attachScreen(stream);
             } else if (remoteVideoRef.current) {
               remoteVideoRef.current.srcObject = stream;
               remoteVideoRef.current.play().catch(() => {});
@@ -236,11 +377,7 @@ export default function WebRTCRoom({
           };
 
           track.onended = () => {
-            if (track.id !== remoteCameraTrackId) {
-              setHasRemoteScreen(false);
-              remoteScreenStreamRef.current = null;
-              if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
-            }
+            if (isScreenTrack(track.id, stream)) detachScreen();
           };
         }
       };
@@ -258,19 +395,65 @@ export default function WebRTCRoom({
           track.enabled = !track.enabled;
           return !track.enabled;
         },
+        toggleFullscreen: () => {
+          if (isFullscreenActive()) {
+            exitFullscreen().catch(() => {});
+            return false;
+          }
+          if (containerRef.current) requestFullscreen(containerRef.current).catch(() => {});
+          return true;
+        },
         requestPeerMute: () => send({ type: "mute-request" }),
+        requestPeerScreenShare: () => send({ type: "screenshare-request" }),
         notifyPeerEnded: () => send({ type: "call-ended" }),
+        stopMedia: () => {
+          localStream?.getTracks().forEach((t) => t.stop());
+          // The screen-share track is owned by the page that passed it in, so it is left
+          // alone here; that page stops it as part of its own teardown.
+        },
       });
 
       const wsUrl = `${wsBaseUrl()}/interviews/${sessionId}/ws/signal?token=${encodeURIComponent(
         token
       )}&role=${role}`;
       ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
       ws.onmessage = async (event) => {
         const message = JSON.parse(event.data);
         if (message.type === "peer-joined") {
           setPeerPresent(true);
-          addLocalTracks();
+          // Only the candidate initiates. The relay delivers "peer-joined" to both
+          // browsers at the same instant, so when both sides addTrack here they both fire
+          // onnegotiationneeded and offer simultaneously — glare on every single call. The
+          // impolite side (interviewer) then drops the candidate's offer, and that offer is
+          // the only one carrying the screen-share m-line, so the screen share ended up
+          // never negotiated at all. The interviewer adds its own tracks when the offer
+          // arrives (below), so both directions still come up in one exchange.
+          if (role === "candidate") {
+            if (tracksAddedRef.current) {
+              // Peer reconnected (remount/refresh) with a brand-new RTCPeerConnection, so
+              // it needs a fresh offer — but addLocalTracks() won't produce one, having
+              // already run for the previous peer. restartIce() re-raises
+              // onnegotiationneeded (with new ICE credentials, which the new peer needs
+              // anyway) rather than duplicating the offer logic here.
+              pc?.restartIce();
+            } else {
+              addLocalTracks();
+            }
+            // Re-sent here as well as at addTrack time: if the candidate started sharing
+            // before the interviewer joined, the original announcement went to an empty
+            // room and the relay dropped it.
+            const announced = announcedScreenRef.current;
+            if (announced && ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "screen-track", ...announced }));
+            }
+          }
+        } else if (message.type === "screen-track") {
+          if (message.trackId) announcedScreenIds.add(message.trackId);
+          if (message.streamId) announcedScreenIds.add(message.streamId);
+          reclassifyAnnouncedScreen();
+        } else if (message.type === "screen-track-ended") {
+          detachScreen();
         } else if (message.type === "peer-left") {
           setPeerPresent(false);
           onPeerConnectedChange?.(false);
@@ -279,6 +462,10 @@ export default function WebRTCRoom({
           remoteCameraTrackId = null;
           remoteCameraStreamRef.current = null;
           remoteScreenStreamRef.current = null;
+          // Cleared too, so a rejoin re-classifies from scratch instead of matching this
+          // call's stale track ids.
+          seenVideo.clear();
+          announcedScreenIds.clear();
           setHasRemoteScreen(false);
           onPeerEnded?.();
         } else if (message.type === "call-ended") {
@@ -322,6 +509,8 @@ export default function WebRTCRoom({
           }
         } else if (message.type === "mute-request") {
           onMuteRequested?.();
+        } else if (message.type === "screenshare-request") {
+          onScreenShareRequested?.();
         }
       };
     }
@@ -331,6 +520,8 @@ export default function WebRTCRoom({
     return () => {
       cancelled = true;
       tracksAddedRef.current = false;
+      announcedScreenRef.current = null;
+      wsRef.current = null;
       ws?.close();
       pc?.close();
       localStream?.getTracks().forEach((t) => t.stop());
@@ -356,8 +547,13 @@ export default function WebRTCRoom({
 
   if (role === "interviewer") {
     return (
-      <div className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3">
+      <div ref={containerRef} className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3">
         <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+        {mediaError && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 max-w-lg px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium shadow-md">
+            ⚠️ {mediaError}
+          </div>
+        )}
 
         {/* Candidate Screenshare Viewport (Always in DOM) */}
         <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
@@ -447,8 +643,13 @@ export default function WebRTCRoom({
   }
 
   return (
-    <div className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
+    <div ref={containerRef} className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      {mediaError && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 max-w-lg px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium shadow-md">
+          ⚠️ {mediaError}
+        </div>
+      )}
       {!peerPresent && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
           Waiting for interviewer to join…
@@ -476,6 +677,7 @@ function LiveKitRoomRenderer({
   extraVideoTrack,
   onApiReady,
   onMuteRequested,
+  onScreenShareRequested,
   onPeerEnded,
   onPeerConnectedChange,
   enableEyeTracking,
@@ -488,12 +690,14 @@ function LiveKitRoomRenderer({
   extraVideoTrack?: MediaStreamTrack | null;
   onApiReady?: (api: WebRTCApi) => void;
   onMuteRequested?: () => void;
+  onScreenShareRequested?: () => void;
   onPeerEnded?: () => void;
   onPeerConnectedChange?: (connected: boolean) => void;
   enableEyeTracking?: boolean;
   onGazeChange?: (isFocused: boolean, isTeleprompter?: boolean) => void;
 }) {
   const room = useMemo(() => new Room(), []);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const cameraTracks = useTracks([Track.Source.Camera]);
   const screenTracks = useTracks([Track.Source.ScreenShare]);
@@ -511,9 +715,14 @@ function LiveKitRoomRenderer({
   // Publish screen-share track if available and room is connected
   useEffect(() => {
     if (extraVideoTrack && room.state === "connected") {
-      room.localParticipant.publishTrack(extraVideoTrack).catch((err) => {
-        console.error("failed to publish extra video track", err);
-      });
+      // source matters: without it the track publishes as an unknown/camera source and
+      // the other side's useTracks([Track.Source.ScreenShare]) never matches it, so the
+      // screen share silently never appears.
+      room.localParticipant
+        .publishTrack(extraVideoTrack, { source: Track.Source.ScreenShare })
+        .catch((err) => {
+          console.error("failed to publish extra video track", err);
+        });
     }
   }, [extraVideoTrack, room, room.state]);
 
@@ -530,6 +739,14 @@ function LiveKitRoomRenderer({
           room.localParticipant.setCameraEnabled(!isEnabled);
           return isEnabled;
         },
+        toggleFullscreen: () => {
+          if (isFullscreenActive()) {
+            exitFullscreen().catch(() => {});
+            return false;
+          }
+          if (containerRef.current) requestFullscreen(containerRef.current).catch(() => {});
+          return true;
+        },
         requestPeerMute: () => {
           const encoder = new TextEncoder();
           room.localParticipant.publishData(
@@ -537,12 +754,24 @@ function LiveKitRoomRenderer({
             { reliable: true }
           ).catch((err) => console.error("failed to publish data", err));
         },
+        requestPeerScreenShare: () => {
+          const encoder = new TextEncoder();
+          room.localParticipant.publishData(
+            encoder.encode(JSON.stringify({ type: "screenshare-request" })),
+            { reliable: true }
+          ).catch((err: unknown) => console.error("failed to publish data", err));
+        },
         notifyPeerEnded: () => {
           const encoder = new TextEncoder();
           room.localParticipant.publishData(
             encoder.encode(JSON.stringify({ type: "call-ended" })),
             { reliable: true }
           ).catch((err) => console.error("failed to publish data", err));
+        },
+        stopMedia: () => {
+          // Disabling these unpublishes the tracks and hands the devices back.
+          room.localParticipant.setCameraEnabled(false).catch(() => {});
+          room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
         },
       });
     }
@@ -555,6 +784,8 @@ function LiveKitRoomRenderer({
         const msg = JSON.parse(decoder.decode(payload));
         if (msg.type === "mute-request") {
           onMuteRequested?.();
+        } else if (msg.type === "screenshare-request") {
+          onScreenShareRequested?.();
         } else if (msg.type === "call-ended") {
           onPeerEnded?.();
         }
@@ -571,19 +802,20 @@ function LiveKitRoomRenderer({
       room.off("dataReceived", handleData);
       room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     };
-  }, [onMuteRequested, onPeerEnded, room]);
+  }, [onMuteRequested, onScreenShareRequested, onPeerEnded, room]);
 
   if (role === "interviewer") {
     return (
-      <LiveKitRoom
-        room={room}
-        serverUrl={url}
-        token={token}
-        connect={true}
-        video={true}
-        audio={true}
-        className="relative w-full h-full min-h-[380px] flex flex-col md:flex-row gap-3"
-      >
+      <div ref={containerRef} className="relative w-full h-full min-h-[380px]">
+        <LiveKitRoom
+          room={room}
+          serverUrl={url}
+          token={token}
+          connect={true}
+          video={true}
+          audio={true}
+          className="w-full h-full flex flex-col md:flex-row gap-3"
+        >
         <RoomAudioRenderer />
         {/* Candidate Screenshare Viewport */}
         <div className="relative flex-1 min-h-[220px] bg-zinc-950 rounded-xl overflow-hidden border border-zinc-200 flex flex-col items-center justify-center">
@@ -627,47 +859,50 @@ function LiveKitRoomRenderer({
             />
           )}
         </div>
-      </LiveKitRoom>
+        </LiveKitRoom>
+      </div>
     );
   }
 
   return (
-    <LiveKitRoom
-      room={room}
-      serverUrl={url}
-      token={token}
-      connect={true}
-      video={true}
-      audio={true}
-      className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200"
-    >
-      <RoomAudioRenderer />
-      {!peerPresent && (
-        <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
-          Waiting for interviewer to join…
-        </p>
-      )}
+    <div ref={containerRef} className="relative w-full h-full min-h-[360px] rounded-xl bg-black overflow-hidden border border-zinc-200">
+      <LiveKitRoom
+        room={room}
+        serverUrl={url}
+        token={token}
+        connect={true}
+        video={true}
+        audio={true}
+        className="relative w-full h-full"
+      >
+        <RoomAudioRenderer />
+        {!peerPresent && (
+          <p className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
+            Waiting for interviewer to join…
+          </p>
+        )}
 
-      {remoteCamera && (
-        <VideoTrack
-          trackRef={remoteCamera}
-          className="w-full h-full object-contain"
-        />
-      )}
+        {remoteCamera && (
+          <VideoTrack
+            trackRef={remoteCamera}
+            className="w-full h-full object-contain"
+          />
+        )}
 
-      {remoteScreen && (
-        <VideoTrack
-          trackRef={remoteScreen}
-          className="absolute inset-0 w-full h-full object-contain bg-black"
-        />
-      )}
+        {remoteScreen && (
+          <VideoTrack
+            trackRef={remoteScreen}
+            className="absolute inset-0 w-full h-full object-contain bg-black"
+          />
+        )}
 
-      {localCamera && (
-        <VideoTrack
-          trackRef={localCamera}
-          className="absolute bottom-2 right-2 w-28 h-20 rounded-lg border border-white/40 shadow object-cover"
-        />
-      )}
-    </LiveKitRoom>
+        {localCamera && (
+          <VideoTrack
+            trackRef={localCamera}
+            className="absolute bottom-2 right-2 w-28 h-20 rounded-lg border border-white/40 shadow object-cover"
+          />
+        )}
+      </LiveKitRoom>
+    </div>
   );
 }

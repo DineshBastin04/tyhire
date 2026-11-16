@@ -61,6 +61,8 @@ def on_startup():
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'voice_mismatch'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'ai_extension_detected'"))
             conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'teleprompter_reading'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'proctoring_tamper_detected'"))
+            conn.execute(text("ALTER TYPE signaltype ADD VALUE IF NOT EXISTS 'screen_share_never'"))
             
             # Phase 1 & 3 Job and Candidate columns
             conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weight_communication FLOAT DEFAULT 0.0;"))
@@ -78,6 +80,7 @@ def on_startup():
             conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS skills_breakdown JSONB;"))
             conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS profession_fit JSONB;"))
             conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS campus_metadata JSONB;"))
+            conn.execute(text("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS experience_analysis JSONB;"))
     except Exception as exc:
         logger.debug("PostgreSQL startup migration notice: %s", exc)
 
@@ -100,6 +103,7 @@ def on_startup():
         ("candidates", "skills_breakdown", "JSON"),
         ("candidates", "profession_fit", "JSON"),
         ("candidates", "campus_metadata", "JSON"),
+        ("candidates", "experience_analysis", "JSON"),
     ]
     for table, col, col_type in sqlite_cols:
         try:

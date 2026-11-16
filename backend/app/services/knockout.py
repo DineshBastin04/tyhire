@@ -1,5 +1,6 @@
 import re
 from app.models.job import Job, WorkMode
+from app.services import experience
 
 BRANCH_ALIASES: dict[str, set[str]] = {
     "cse": {"cse", "cs", "computer science", "computer science and engineering", "comp sci", "computer engineering"},
@@ -50,14 +51,37 @@ def _match_campus_branch(candidate_branch: str, allowed_branches: list[str]) -> 
     return False
 
 
+RUPEES_PER_LAKH = 100_000
+
+
+def _lpa(rupees: float) -> str:
+    """Rupees rendered back into the unit HR actually typed.
+
+    The band is entered in lakhs per annum and stored in rupees, so a reason quoting the
+    raw figure makes the reader convert it back in their head before they can compare it
+    to the number they set on the job.
+    """
+    return f"{rupees / RUPEES_PER_LAKH:.2f}".rstrip("0").rstrip(".") + " LPA"
+
+
 def check_knockout(profile: dict, job: Job) -> tuple[bool, list[str]]:
     reasons: list[str] = []
 
-    years = profile.get("total_years_experience")
+    # Measured from the employment-history dates rather than taken from the resume's own
+    # total, which is a self-reported claim — routinely rounded up, left stale from an
+    # older CV, or counted from the start of a degree. analyze_experience falls back to the
+    # stated figure when the dates can't be read, so this never fails someone for having an
+    # unusually-formatted history (see services/experience.py).
+    exp = experience.analyze_experience(profile)
+    years = exp["computed_years"] if exp["basis"] == "employment_history" else exp["claimed_years"]
     if job.min_years_experience is not None and years is not None:
         if years < job.min_years_experience:
+            measured = exp["basis"] == "employment_history"
+            source = "employment history shows" if measured else "resume states"
+            qualifier = " (approx.)" if measured and exp["approximate"] else ""
             reasons.append(
-                f"Requires {job.min_years_experience}+ yrs experience, candidate has {years}"
+                f"Requires {job.min_years_experience}+ yrs experience, "
+                f"{source} {years}{qualifier}"
             )
 
     # A remote role shouldn't knock candidates out for location at all, regardless of
@@ -87,8 +111,8 @@ def check_knockout(profile: dict, job: Job) -> tuple[bool, list[str]]:
     if job.salary_band_max is not None and expected_salary is not None:
         if expected_salary > job.salary_band_max:
             reasons.append(
-                f"Expected salary {expected_salary} exceeds the role's budget of "
-                f"{job.salary_band_max}"
+                f"Expected salary {_lpa(expected_salary)} exceeds the role's budget of "
+                f"{_lpa(job.salary_band_max)}"
             )
 
     return (len(reasons) > 0, reasons)

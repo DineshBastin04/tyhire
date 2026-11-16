@@ -1,9 +1,16 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import Link from "next/link";
-import { ApiError, deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
+import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
+import { getScoreLabel } from "@/lib/scoreLabel";
 import JobForm, { type JobPayload } from "@/components/JobForm";
 import CampusBulkUploader from "@/components/CampusBulkUploader";
 import { useDialog } from "@/components/Dialog";
@@ -21,49 +28,44 @@ const BUCKET_COLORS: Record<Bucket, string> = {
   declined: "bucket-declined",
 };
 
-// Mirrors the backend's comparison_max_candidates default (core/config.py). The backend is the
-// hard enforcer; this only drives the UI's "deselect some" feedback before a request is made.
-const COMPARE_MAX = 10;
+// What the backend can actually read (services/text_extract.py reads .pdf and .docx, and
+// nothing else). The file picker enforces this through its `accept` attribute, but a drop
+// bypasses `accept` entirely — so dropped files are filtered against the same list here.
+// Without it a .doc or a screenshot reaches the server and comes back as a card in the
+// "failed to process" panel, far from the moment the mistake was made.
+const ACCEPTED_RESUME_EXTENSIONS = [".pdf", ".docx"];
+
+function isAcceptedResume(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return ACCEPTED_RESUME_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+/** Identity for de-duping a selection. Dropping the same batch twice is an easy slip, and
+ * each copy would otherwise upload and score separately — then show up as a duplicate the
+ * reviewer has to deal with. */
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
 
 export default function JobDetailPage() {
-  const { prompt, toast } = useDialog();
+  const { confirm, prompt, notify } = useDialog();
   const { jobId } = useParams<{ jobId: string }>();
   const router = useRouter();
   const [job, setJob] = useState<Job | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadSource, setUploadSource] = useState("");
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [dragActive, setDragActive] = useState(false);
-  // dragenter/dragleave fire for every child element, so a plain boolean flickers. A depth
-  // counter keeps the highlight on until the cursor actually leaves the drop zone.
-  const dragDepth = useRef(0);
   const [notFound, setNotFound] = useState(false);
   const [editing, setEditing] = useState(false);
   const [isCampusBulkOpen, setIsCampusBulkOpen] = useState(false);
-  const [selectMode, setSelectMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const toggleSelected = useCallback((id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  function exitSelectMode() {
-    setSelectMode(false);
-    setSelected(new Set());
-  }
-
-  function startComparison() {
-    const ids = Array.from(selected);
-    if (ids.length < 2 || ids.length > COMPARE_MAX) return;
-    router.push(`/jobs/${jobId}/compare?ids=${ids.join(",")}`);
-  }
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [rejectedCount, setRejectedCount] = useState(0);
+  // dragenter/dragleave also fire as the pointer crosses child elements, so a plain
+  // boolean makes the highlight flicker whenever the cursor passes over the text inside
+  // the zone. Counting enters against leaves is what actually tracks "still inside".
+  const dragDepth = useRef(0);
 
   const refresh = useCallback(() => {
     getJson<Job>(`/jobs/${jobId}`)
@@ -78,71 +80,53 @@ export default function JobDetailPage() {
     refresh();
   }, [refresh]);
 
-  const ACCEPTED_EXT = [".pdf", ".docx"];
-  const isAcceptedFile = (name: string) =>
-    ACCEPTED_EXT.some((ext) => name.toLowerCase().endsWith(ext));
+  // A file dropped anywhere other than the zone would otherwise be opened by the browser,
+  // navigating away from a page that may have a batch staged on it. Swallowing the default
+  // outside the zone makes a near miss do nothing instead.
+  useEffect(() => {
+    const swallow = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", swallow);
+    window.addEventListener("drop", swallow);
+    return () => {
+      window.removeEventListener("dragover", swallow);
+      window.removeEventListener("drop", swallow);
+    };
+  }, []);
 
-  // Shared by both the file picker and drag-and-drop: keep only PDF/DOCX, de-dupe by
-  // name+size, and warn (toast) about anything skipped (TYH-007).
-  function addFiles(incoming: FileList | File[]) {
-    const arr = Array.from(incoming);
-    const accepted = arr.filter((f) => isAcceptedFile(f.name));
-    const skipped = arr.length - accepted.length;
-    if (skipped > 0) {
-      toast({
-        message: `${skipped} file${skipped > 1 ? "s" : ""} skipped — only PDF and DOCX resumes are accepted.`,
-        variant: "error",
-      });
-    }
-    if (accepted.length === 0) return;
-    setSelectedFiles((prev) => {
-      const key = (f: File) => `${f.name}:${f.size}`;
-      const seen = new Set(prev.map(key));
-      const merged = [...prev];
-      for (const f of accepted) {
-        if (!seen.has(key(f))) {
-          merged.push(f);
-          seen.add(key(f));
-        }
-      }
-      return merged;
+  const addFiles = useCallback((incoming: FileList | null) => {
+    if (!incoming || incoming.length === 0) return;
+    const picked = Array.from(incoming);
+    const accepted = picked.filter(isAcceptedResume);
+    setRejectedCount(picked.length - accepted.length);
+    setSelectedFiles((current) => {
+      const seen = new Set(current.map(fileKey));
+      return [...current, ...accepted.filter((f) => !seen.has(fileKey(f)))];
     });
+  }, []);
+
+  function clearSelection() {
+    setSelectedFiles([]);
+    setRejectedCount(0);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
-    if (e.target.files?.length) addFiles(e.target.files);
-    // Reset so selecting the same file again still fires onChange.
-    e.target.value = "";
-  }
-
-  function handleDragEnter(e: React.DragEvent) {
+  function handleDragEnter(e: ReactDragEvent<HTMLElement>) {
     e.preventDefault();
     dragDepth.current += 1;
-    setDragActive(true);
+    setIsDragging(true);
   }
 
-  function handleDragOver(e: React.DragEvent) {
+  function handleDragLeave(e: ReactDragEvent<HTMLElement>) {
     e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setIsDragging(false);
   }
 
-  function handleDragLeave(e: React.DragEvent) {
-    e.preventDefault();
-    dragDepth.current -= 1;
-    if (dragDepth.current <= 0) {
-      dragDepth.current = 0;
-      setDragActive(false);
-    }
-  }
-
-  function handleDrop(e: React.DragEvent) {
+  function handleDrop(e: ReactDragEvent<HTMLElement>) {
     e.preventDefault();
     dragDepth.current = 0;
-    setDragActive(false);
-    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
-  }
-
-  function removeFile(index: number) {
-    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
+    setIsDragging(false);
+    addFiles(e.dataTransfer.files);
   }
 
   async function handleUpload() {
@@ -152,27 +136,57 @@ export default function JobDetailPage() {
     selectedFiles.forEach((f) => form.append("files", f));
     if (uploadSource.trim()) form.append("source", uploadSource.trim());
 
-    const count = selectedFiles.length;
     setUploading(true);
     try {
-      await postForm(`/jobs/${jobId}/resumes`, form);
-      setSelectedFiles([]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      toast({
-        message: `${count} resume${count > 1 ? "s" : ""} uploaded.`,
-        variant: "success",
-      });
+      const uploaded = await postForm<Candidate[]>(`/jobs/${jobId}/resumes`, form);
+      clearSelection();
       refresh();
-    } catch (err) {
-      toast({
-        message:
-          err instanceof ApiError
-            ? err.message
-            : "Could not upload the resumes. Please try again.",
-        variant: "error",
-      });
+
+      // Duplicates are skipped rather than scored, and they land in a collapsed list
+      // further down the page — easy to miss when you've just uploaded a batch and are
+      // looking at the buckets. Say so directly instead.
+      const duplicates = uploaded.filter((c) => c.is_duplicate_of);
+      if (duplicates.length > 0) {
+        const names = duplicates
+          .map((c) => c.full_name || c.email || "Unnamed candidate")
+          .join(", ");
+        await notify({
+          title:
+            duplicates.length === 1
+              ? "Duplicate resume skipped"
+              : `${duplicates.length} duplicate resumes skipped`,
+          description:
+            `${names} ${duplicates.length === 1 ? "is" : "are"} already on this job — ` +
+            `matched on email address, mobile number or name. ` +
+            `${duplicates.length === 1 ? "This resume was" : "These resumes were"} not ` +
+            `scored again, and can be found under "Duplicates" below the candidate buckets.`,
+        });
+      }
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function handleDeleteJob() {
+    if (!job) return;
+    const ok = await confirm({
+      title: "Delete job",
+      description:
+        `Permanently delete "${job.title}"? This also permanently deletes every candidate ` +
+        `attached to this job — their resumes, AI scores, and interview history all go ` +
+        `with it. This cannot be undone.`,
+      confirmLabel: "Delete permanently",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteJson(`/jobs/${jobId}`, { reason: "Deleted from the job page" });
+      router.push("/jobs");
+    } catch (err) {
+      await notify({
+        title: "Could not delete job",
+        description: err instanceof Error ? err.message : "Could not delete this job.",
+      });
     }
   }
 
@@ -241,123 +255,87 @@ export default function JobDetailPage() {
               {job.level} · {job.work_mode} · required: {job.required_skills.join(", ") || "—"}
             </p>
           </div>
-          <button onClick={() => setEditing(true)} className="btn-outline">
-            Edit job
-          </button>
+          <span className="flex gap-2 shrink-0">
+            <button onClick={() => setEditing(true)} className="btn-outline">
+              Edit job
+            </button>
+            <button
+              onClick={handleDeleteJob}
+              className="btn-danger-outline"
+              title="Permanently delete this job and all of its candidates"
+            >
+              Delete job
+            </button>
+          </span>
         </div>
       )}
 
-      <div className="border border-zinc-200 rounded-md p-4 flex items-start justify-between gap-3 flex-wrap bg-zinc-50/50">
-        <div className="flex-1 min-w-[280px] space-y-2">
-          <div
-            onDragEnter={handleDragEnter}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                fileInputRef.current?.click();
-              }
-            }}
-            role="button"
-            tabIndex={0}
-            aria-label="Upload resumes: drag and drop files here, or click to browse"
-            className={`flex flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed px-4 py-6 text-center cursor-pointer transition-colors ${
-              dragActive
-                ? "border-indigo-400 bg-indigo-50"
-                : "border-zinc-300 bg-white hover:border-zinc-400"
-            }`}
-          >
+      <div className="border border-zinc-200 rounded-md p-4 space-y-3 bg-zinc-50/50">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap">
+            {/* The real input still does the picking; the zone below is its trigger and
+              * its drop target. tabIndex -1 keeps this out of the tab order, since an
+              * invisible focus stop reads as the focus ring vanishing — the button is the
+              * keyboard path to the same dialog. */}
             <input
               ref={fileInputRef}
               type="file"
               multiple
               accept=".pdf,.docx"
-              className="hidden"
-              onChange={handleFileInputChange}
+              tabIndex={-1}
+              className="sr-only"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                // Clearing it lets the same file be picked again after being removed from
+                // the list: left as-is the input still holds it, and choosing it a second
+                // time fires no change event at all.
+                e.target.value = "";
+              }}
             />
-            <span className="text-sm font-medium text-zinc-700">
-              {dragActive
-                ? "Drop resumes to add them"
-                : "Drag & drop resumes here, or click to browse"}
-            </span>
-            <span className="text-xs text-zinc-500">PDF or DOCX · multiple files supported</span>
-          </div>
-
-          {selectedFiles.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {selectedFiles.map((f, i) => (
-                <span
-                  key={`${f.name}:${f.size}:${i}`}
-                  className="inline-flex items-center gap-1 rounded bg-white border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-                >
-                  <span className="max-w-[180px] truncate" title={f.name}>
-                    {f.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeFile(i);
-                    }}
-                    className="text-zinc-400 hover:text-red-600 leading-none"
-                    aria-label={`Remove ${f.name}`}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-              <button
-                type="button"
-                onClick={() => setSelectedFiles([])}
-                className="text-xs text-zinc-500 hover:text-red-600 underline underline-offset-2 px-1"
-              >
-                Clear all
-              </button>
-            </div>
-          )}
-
-          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDrop={handleDrop}
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onDragOver={(e) => {
+                // Without preventDefault here the element is not a valid drop target and
+                // the drop never fires at all.
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              className={`flex min-w-[19rem] flex-col items-center justify-center rounded-md border-2 border-dashed px-4 py-2.5 text-center transition-colors ${
+                isDragging
+                  ? "border-blue-500 bg-blue-50 text-blue-900"
+                  : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+              }`}
+            >
+              <span className="text-sm font-medium">
+                {isDragging ? "Drop to add them" : "Drag & drop resumes here"}
+              </span>
+              <span className="mt-0.5 text-xs text-zinc-500">
+                or click to browse — PDF or DOCX
+              </span>
+            </button>
             <input
               value={uploadSource}
               onChange={(e) => setUploadSource(e.target.value)}
               placeholder="Source (optional): referral, LinkedIn…"
-              className="input w-56 bg-surface"
+              className="input w-56 bg-white"
             />
             <button
               onClick={handleUpload}
               disabled={uploading || selectedFiles.length === 0}
-              className="btn-primary"
+              className="btn-primary disabled:opacity-40"
             >
               {uploading
                 ? "Processing…"
                 : selectedFiles.length > 0
-                ? `Upload ${selectedFiles.length} resume${selectedFiles.length > 1 ? "s" : ""}`
-                : "Upload resumes"}
+                  ? `Upload ${selectedFiles.length} resume${selectedFiles.length === 1 ? "" : "s"}`
+                  : "Upload resumes"}
             </button>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {!selectMode ? (
-            <button
-              type="button"
-              onClick={() => setSelectMode(true)}
-              className="btn-outline text-xs font-semibold px-3 py-2"
-            >
-              ⚖️ Compare candidates
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={exitSelectMode}
-              className="btn-outline text-xs font-semibold px-3 py-2"
-            >
-              Cancel compare
-            </button>
-          )}
           <button
             type="button"
             onClick={() => setIsCampusBulkOpen(true)}
@@ -366,37 +344,54 @@ export default function JobDetailPage() {
             🎓 Campus Bulk Drive Screening
           </button>
         </div>
-      </div>
 
-      {selectMode && (
-        <div className="sticky top-0 z-10 border border-blue-300 bg-blue-50 rounded-md p-3 flex items-center justify-between gap-3 flex-wrap">
-          <div className="text-sm text-blue-900">
-            <span className="font-semibold">{selected.size}</span> selected
-            {selected.size > COMPARE_MAX && (
-              <span className="text-red-700 ml-2">
-                — too many. Compare up to {COMPARE_MAX} at once; deselect {selected.size - COMPARE_MAX}.
+        {rejectedCount > 0 && (
+          <p className="text-xs text-amber-700">
+            {rejectedCount} file{rejectedCount === 1 ? " was" : "s were"} left out — only
+            PDF and DOCX can be read.
+          </p>
+        )}
+
+        {selectedFiles.length > 0 && (
+          <div className="rounded-md border border-zinc-200 bg-white p-2">
+            <div className="flex items-center justify-between px-1 pb-1.5">
+              <span className="text-xs font-semibold text-zinc-700">
+                {selectedFiles.length} file{selectedFiles.length === 1 ? "" : "s"} ready to
+                upload
               </span>
-            )}
-            {selected.size < 2 && (
-              <span className="text-blue-700 ml-2">— pick at least 2 candidates to compare.</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {selected.size > 0 && (
-              <button onClick={() => setSelected(new Set())} className="btn-outline text-xs px-2 py-1">
-                Clear
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-xs text-zinc-500 underline hover:text-red-600"
+              >
+                Clear all
               </button>
-            )}
-            <button
-              onClick={startComparison}
-              disabled={selected.size < 2 || selected.size > COMPARE_MAX}
-              className="btn-primary text-xs px-3 py-1.5"
-            >
-              Compare {selected.size >= 2 && selected.size <= COMPARE_MAX ? `(${selected.size})` : ""}
-            </button>
+            </div>
+            <ul className="max-h-32 space-y-0.5 overflow-y-auto">
+              {selectedFiles.map((file) => (
+                <li
+                  key={fileKey(file)}
+                  className="flex items-center justify-between gap-2 rounded px-1 py-0.5 text-xs hover:bg-zinc-50"
+                >
+                  <span className="truncate text-zinc-700">{file.name}</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedFiles((current) =>
+                        current.filter((f) => fileKey(f) !== fileKey(file))
+                      )
+                    }
+                    className="shrink-0 text-zinc-400 hover:text-red-600"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <CampusBulkUploader
         jobId={jobId}
@@ -446,13 +441,7 @@ export default function JobDetailPage() {
               </h2>
               <div className="space-y-2">
                 {inBucket.map((c) => (
-                  <CandidateCard
-                    key={c.id}
-                    candidate={c}
-                    selectMode={selectMode}
-                    selected={selected.has(c.id)}
-                    onToggle={toggleSelected}
-                  />
+                  <CandidateCard key={c.id} candidate={c} />
                 ))}
                 {inBucket.length === 0 && (
                   <p className="text-xs opacity-60">No candidates here yet.</p>
@@ -512,30 +501,26 @@ export default function JobDetailPage() {
   );
 }
 
-function CandidateCard({
-  candidate,
-  selectMode,
-  selected,
-  onToggle,
-}: {
-  candidate: Candidate;
-  selectMode: boolean;
-  selected: boolean;
-  onToggle: (id: string) => void;
-}) {
+function CandidateCard({ candidate }: { candidate: Candidate }) {
   const effectiveBucket = candidate.override_bucket ?? candidate.bucket;
 
-  const cardBody = (
-    <>
+  return (
+    <Link
+      href={`/candidates/${candidate.id}`}
+      className="block bg-white border border-zinc-200 rounded-md p-2.5 text-sm hover:border-zinc-300 hover:shadow-sm transition space-y-1.5"
+    >
       <div className="flex justify-between items-start">
         <span className="font-medium text-zinc-900 leading-tight">
           {candidate.full_name ?? candidate.email ?? "Unnamed candidate"}
         </span>
         <span className="text-xs font-semibold text-zinc-700 bg-zinc-100 px-1.5 py-0.5 rounded shrink-0 ml-2">
-          {candidate.fit_score !== null ? `${candidate.fit_score.toFixed(0)}/100` : "—"}
+          {candidate.fit_score !== null
+            ? `${candidate.fit_score.toFixed(0)}/100`
+            : "—"}
         </span>
       </div>
 
+      {/* Dual Score Badges */}
       {(candidate.technical_score !== null || candidate.communication_score !== null) && (
         <div className="flex items-center gap-1.5 text-[11px]">
           {candidate.technical_score !== null && (
@@ -551,6 +536,7 @@ function CandidateCard({
         </div>
       )}
 
+      {/* Skill & Profession chips summary */}
       {candidate.skills_breakdown && candidate.skills_breakdown.relevant_skills.length > 0 && (
         <div className="text-[11px] text-emerald-700 flex items-center gap-1">
           <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
@@ -573,39 +559,6 @@ function CandidateCard({
       {candidate.override_bucket && (
         <p className="text-xs text-zinc-500">Overridden to {effectiveBucket}</p>
       )}
-    </>
-  );
-
-  // In compare mode the whole card is a selection toggle, not a navigation link — so a
-  // recruiter building a comparison set never accidentally leaves the pipeline.
-  if (selectMode) {
-    return (
-      <button
-        type="button"
-        onClick={() => onToggle(candidate.id)}
-        aria-pressed={selected}
-        className={`w-full text-left bg-surface border rounded-md p-2.5 text-sm transition space-y-1.5 flex gap-2 ${
-          selected ? "border-blue-500 ring-1 ring-blue-400" : "border-zinc-200 hover:border-zinc-300"
-        }`}
-      >
-        <input
-          type="checkbox"
-          checked={selected}
-          readOnly
-          tabIndex={-1}
-          className="mt-0.5 shrink-0 pointer-events-none"
-        />
-        <div className="flex-1 space-y-1.5">{cardBody}</div>
-      </button>
-    );
-  }
-
-  return (
-    <Link
-      href={`/candidates/${candidate.id}`}
-      className="block bg-surface border border-zinc-200 rounded-md p-2.5 text-sm hover:border-zinc-300 hover:shadow-sm transition space-y-1.5"
-    >
-      {cardBody}
     </Link>
   );
 }

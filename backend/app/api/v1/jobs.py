@@ -1,5 +1,6 @@
 import os
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.models.job import Job
 from app.schemas.job import (
     JobArchiveRequest,
     JobCreate,
+    JobDeleteRequest,
     JobOut,
     JobSuggestRequest,
     JobSuggestResponse,
@@ -103,14 +105,25 @@ def update_job(
         raise HTTPException(status_code=400, detail="salary_band_min must not exceed salary_band_max")
 
     # Same reasoning as above, mirroring JobCreate's _weights_sum_to_one — a partial update
-    # touching only one weight field would otherwise leave the other three (carried over
-    # from the existing job) summing to something scoring.score_candidate never expected.
+    # touching only one weight field would otherwise leave the others (carried over from the
+    # existing job) summing to something scoring.score_candidate never expected.
+    #
+    # All five categories are counted. Communication was added as a fifth weighted category
+    # after this check was written and never added here, so the total always came up short
+    # by exactly that weight and every save was rejected — a job created through the current
+    # form (which spreads weight across all five) could never be edited again. Legacy jobs
+    # are unaffected: their communication weight is 0.0 and the other four already sum to 1.
     weight_total = (
-        job.weight_skills + job.weight_experience + job.weight_education + job.weight_certifications
+        job.weight_skills
+        + job.weight_experience
+        + job.weight_education
+        + job.weight_certifications
+        + (job.weight_communication or 0.0)
     )
     if abs(weight_total - 1.0) > 0.01:
         raise HTTPException(
-            status_code=400, detail=f"Sub-score weights must sum to 1.0 (got {weight_total})"
+            status_code=400,
+            detail=f"Sub-score weights must sum to 1.0 (got {weight_total:.2f})",
         )
 
     db.add(job)
@@ -207,21 +220,34 @@ def unarchive_job(
 @router.delete("/{job_id}")
 def delete_job(
     job_id: uuid.UUID,
+    payload: Optional[JobDeleteRequest] = None,
     db: Session = Depends(get_db),
     current_hr_user: dict = Depends(require_hr_auth),
 ):
-    """Permanently removes a job AND every candidate attached to it — a deliberate cascade,
-    unlike the single-candidate delete flow (which requires archiving each one first).
+    """Permanently removes a job AND every candidate attached to it — a deliberate cascade.
     Deleting a job's posting without its applicant pipeline would just leave those
     candidates orphaned with a dangling job reference and nothing meaningful to attach them
-    to, so this is treated as removing one unit (job + its pipeline), not two."""
+    to, so this is treated as removing one unit (job + its pipeline), not two.
+
+    Works on an active job as well as an archived one: an unarchived job is archived here
+    first, the same way delete_candidate does it (api/v1/candidates.py). That keeps the
+    audit trail identical to the explicit archive-then-delete flow — the archive is still
+    its own log entry — while costing HR one click instead of two for a job they have
+    already confirmed they want gone."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
     if not job.archived:
-        raise HTTPException(
-            status_code=400, detail="Job must be archived before it can be permanently deleted."
-        )
+        reason = (payload.reason if payload else None) or "Archived as part of deleting the job"
+        job.archived = True
+        job.archived_reason = reason
+        db.add(job)
+        db.add(AuditLog(
+            actor=f"hr:{current_hr_user['email']}",
+            action="archive_job",
+            detail={"job_id": str(job_id), "reason": reason},
+        ))
 
     candidates = db.query(Candidate).filter(Candidate.job_id == job_id).all()
     resume_paths = [c.resume_file_path for c in candidates]

@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { postJson } from "@/lib/api";
 import type { Job, JobLevel, WorkMode } from "@/lib/types";
 import { getScoreLabel, STRICTNESS_PRESETS, type StrictnessKey } from "@/lib/scoreLabel";
+import { lpaToRupees, rupeesToLpaInput } from "@/lib/salary";
 
 type WeightCategory = "skills" | "experience" | "education" | "certifications" | "communication";
 
@@ -200,12 +201,9 @@ export default function JobForm({
   const [maxNoticeDays, setMaxNoticeDays] = useState(
     defaultValues?.max_notice_period_days != null ? String(defaultValues.max_notice_period_days) : ""
   );
-  const [salaryMin, setSalaryMin] = useState(
-    defaultValues?.salary_band_min != null ? String(defaultValues.salary_band_min) : ""
-  );
-  const [salaryMax, setSalaryMax] = useState(
-    defaultValues?.salary_band_max != null ? String(defaultValues.salary_band_max) : ""
-  );
+  // Held as the lakhs figure that is typed and shown; converted to rupees on submit.
+  const [salaryMin, setSalaryMin] = useState(rupeesToLpaInput(defaultValues?.salary_band_min));
+  const [salaryMax, setSalaryMax] = useState(rupeesToLpaInput(defaultValues?.salary_band_max));
 
   // Campus fields
   const [isCampusDrive, setIsCampusDrive] = useState(defaultValues?.is_campus_drive ?? false);
@@ -333,8 +331,8 @@ export default function JobForm({
         min_years_experience: minYears ? Number(minYears) : null,
         allowed_locations: splitList(allowedLocations),
         max_notice_period_days: maxNoticeDays ? Number(maxNoticeDays) : null,
-        salary_band_min: salaryMin ? Number(salaryMin) : null,
-        salary_band_max: salaryMax ? Number(salaryMax) : null,
+        salary_band_min: lpaToRupees(salaryMin),
+        salary_band_max: lpaToRupees(salaryMax),
         approve_threshold: approveThreshold,
         decline_threshold: declineThreshold,
         ...normalizeWeights(
@@ -360,11 +358,18 @@ export default function JobForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      <Field label="Title">
+      <p className="text-xs text-zinc-500">
+        <span className="text-red-600" aria-hidden="true">
+          *
+        </span>{" "}
+        required. Every other field can be left exactly as it is.
+      </p>
+
+      <Field label="Title" required>
         <input required value={title} onChange={(e) => setTitle(e.target.value)} className="input" />
       </Field>
 
-      <Field label="Job description">
+      <Field label="Job description" required>
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-zinc-500">
             Paste your own JD, or leave blank and let AI draft one from the title.
@@ -392,8 +397,9 @@ export default function JobForm({
         <p className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
           Skill Relevancy & Categorization
         </p>
-        <Field label="Required Skills (primary list, comma-separated)">
+        <Field label="Required Skills (primary list, comma-separated)" required>
           <input
+            required
             value={requiredSkills}
             onChange={(e) => setRequiredSkills(e.target.value)}
             className="input bg-surface"
@@ -401,16 +407,18 @@ export default function JobForm({
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Core / Mandatory Skills">
+          <Field label="Core / Mandatory Skills" required>
             <input
+              required
               value={coreSkills}
               onChange={(e) => setCoreSkills(e.target.value)}
               className="input bg-surface text-xs"
               placeholder="FastAPI, Docker, SQL"
             />
           </Field>
-          <Field label="Secondary / Good-to-have Skills">
+          <Field label="Secondary / Good-to-have Skills" required>
             <input
+              required
               value={secondarySkills}
               onChange={(e) => setSecondarySkills(e.target.value)}
               className="input bg-surface text-xs"
@@ -429,8 +437,13 @@ export default function JobForm({
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label="Level">
-          <select value={level} onChange={(e) => setLevel(e.target.value as JobLevel)} className="input">
+        <Field label="Level" required>
+          <select
+            required
+            value={level}
+            onChange={(e) => setLevel(e.target.value as JobLevel)}
+            className="input"
+          >
             <option value="experienced">Experienced</option>
             <option value="fresher">Fresher / entry-level</option>
           </select>
@@ -438,8 +451,9 @@ export default function JobForm({
             Freshers are scored on education, projects and internships instead of work history.
           </p>
         </Field>
-        <Field label="Work mode">
+        <Field label="Work mode" required>
           <select
+            required
             value={workMode}
             onChange={(e) => setWorkMode(e.target.value as WorkMode)}
             className="input"
@@ -455,14 +469,15 @@ export default function JobForm({
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label="Min years experience (eligibility requirement)">
+        <Field label="Min years experience (eligibility requirement)" required>
           <input
+            required
             type="number"
             min={0}
             value={minYears}
             onChange={(e) => setMinYears(e.target.value)}
             className="input"
-            placeholder="Leave blank to skip"
+            placeholder="0 if there is no minimum"
           />
         </Field>
         <Field label="Allowed locations (eligibility requirement)">
@@ -473,36 +488,46 @@ export default function JobForm({
             placeholder="Bangalore, Chennai"
           />
         </Field>
-        <Field label="Max notice period, days (eligibility requirement)">
+        <Field label="Max notice period, days (eligibility requirement)" required>
           <input
+            required
             type="number"
             min={0}
             value={maxNoticeDays}
             onChange={(e) => setMaxNoticeDays(e.target.value)}
             className="input"
-            placeholder="Leave blank to skip"
+            placeholder="e.g. 90"
           />
         </Field>
-        <Field label="Salary band (eligibility requirement on max)">
-          <div className="flex gap-2">
+        <Field label="Salary band in LPA (eligibility requirement on max)" required>
+          <div className="flex items-center gap-2">
+            {/* step="any" rather than a fixed step: with step="0.1" the browser rejects
+              * 5.55 outright, and the whole point here is that any decimal is accepted. */}
             <input
+              required
               type="number"
               min={0}
+              step="any"
               value={salaryMin}
               onChange={(e) => setSalaryMin(e.target.value)}
               className="input"
-              placeholder="Min"
+              placeholder="Min, e.g. 5"
             />
+            <span className="shrink-0 text-xs text-zinc-500">to</span>
             <input
+              required
               type="number"
               min={0}
+              step="any"
               value={salaryMax}
               onChange={(e) => setSalaryMax(e.target.value)}
               className="input"
-              placeholder="Max"
+              placeholder="Max, e.g. 10.5"
             />
+            <span className="shrink-0 text-xs font-medium text-zinc-600">LPA</span>
           </div>
           <p className="text-xs text-zinc-500 mt-1">
+            Lakhs per annum, decimals welcome — 5.5 to 11.3 means ₹5,50,000 to ₹11,30,000.
             Candidates whose expected salary is above the max are knocked out.
           </p>
         </Field>
@@ -692,10 +717,36 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  required,
+  children,
+}: {
+  label: string;
+  /** Marks a field the form will not submit without — only title and job description,
+   * which are the two the API rejects when blank (schemas/job.py). Everything else
+   * defaults to an explicit "(Optional)" rather than to no marker at all: an unmarked
+   * field reads as "nobody said", which is the ambiguity this is here to remove. */
+  required?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <label className="block">
-      <span className="block text-sm font-medium mb-1">{label}</span>
+      <span className="block text-sm font-medium mb-1">
+        {label}
+        {required ? (
+          <>
+            {/* The asterisk is decorative: colour and a glyph carry no meaning to a
+              * screen reader, so the word itself is announced instead. */}
+            <span className="text-red-600 ml-0.5" aria-hidden="true">
+              *
+            </span>
+            <span className="sr-only"> (required)</span>
+          </>
+        ) : (
+          <span className="ml-1 text-xs font-normal text-zinc-500">(Optional)</span>
+        )}
+      </span>
       {children}
     </label>
   );
