@@ -80,7 +80,14 @@ PARSE_PARAMETERS = {
             "type": "number",
             "description": (
                 "Only if the resume explicitly states an expected/current salary figure. "
-                "Omit entirely if not mentioned — do not guess or default to 0."
+                "Omit entirely if not mentioned — do not guess or default to 0. "
+                # Without a unit the same resume yields 6 or 600000 depending on how the
+                # figure happened to be written, and this is compared straight against the
+                # job's band (services/knockout.py). A band of 12 lakhs read against a
+                # "6" means nobody is ever knocked out, silently.
+                "Always give it as a whole annual amount in rupees: '6 LPA' and "
+                "'6 lakhs per annum' are both 600000, '5.5 LPA' is 550000, and a monthly "
+                "figure such as '50,000 per month' is 600000."
             ),
         },
     },
@@ -114,7 +121,7 @@ SYSTEM_PROMPT = (
 
 # Bump when SYSTEM_PROMPT or PARSE_TOOL changes meaning, so previously cached profiles
 # are not served under a prompt that would now extract something different.
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 
 def parse_resume(resume_text: str, today: date | None = None) -> dict:

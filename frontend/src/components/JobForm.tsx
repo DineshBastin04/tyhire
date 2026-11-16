@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { postJson } from "@/lib/api";
 import type { Job, JobLevel, WorkMode } from "@/lib/types";
 import { getScoreLabel, STRICTNESS_PRESETS, type StrictnessKey } from "@/lib/scoreLabel";
+import { lpaToRupees, rupeesToLpaInput } from "@/lib/salary";
 
 type WeightCategory = "skills" | "experience" | "education" | "certifications" | "communication";
 
@@ -200,12 +201,9 @@ export default function JobForm({
   const [maxNoticeDays, setMaxNoticeDays] = useState(
     defaultValues?.max_notice_period_days != null ? String(defaultValues.max_notice_period_days) : ""
   );
-  const [salaryMin, setSalaryMin] = useState(
-    defaultValues?.salary_band_min != null ? String(defaultValues.salary_band_min) : ""
-  );
-  const [salaryMax, setSalaryMax] = useState(
-    defaultValues?.salary_band_max != null ? String(defaultValues.salary_band_max) : ""
-  );
+  // Held as the lakhs figure that is typed and shown; converted to rupees on submit.
+  const [salaryMin, setSalaryMin] = useState(rupeesToLpaInput(defaultValues?.salary_band_min));
+  const [salaryMax, setSalaryMax] = useState(rupeesToLpaInput(defaultValues?.salary_band_max));
 
   // Campus fields
   const [isCampusDrive, setIsCampusDrive] = useState(defaultValues?.is_campus_drive ?? false);
@@ -333,8 +331,8 @@ export default function JobForm({
         min_years_experience: minYears ? Number(minYears) : null,
         allowed_locations: splitList(allowedLocations),
         max_notice_period_days: maxNoticeDays ? Number(maxNoticeDays) : null,
-        salary_band_min: salaryMin ? Number(salaryMin) : null,
-        salary_band_max: salaryMax ? Number(salaryMax) : null,
+        salary_band_min: lpaToRupees(salaryMin),
+        salary_band_max: lpaToRupees(salaryMax),
         approve_threshold: approveThreshold,
         decline_threshold: declineThreshold,
         ...normalizeWeights(
@@ -501,28 +499,35 @@ export default function JobForm({
             placeholder="e.g. 90"
           />
         </Field>
-        <Field label="Salary band (eligibility requirement on max)" required>
-          <div className="flex gap-2">
+        <Field label="Salary band in LPA (eligibility requirement on max)" required>
+          <div className="flex items-center gap-2">
+            {/* step="any" rather than a fixed step: with step="0.1" the browser rejects
+              * 5.55 outright, and the whole point here is that any decimal is accepted. */}
             <input
               required
               type="number"
               min={0}
+              step="any"
               value={salaryMin}
               onChange={(e) => setSalaryMin(e.target.value)}
               className="input"
-              placeholder="Min"
+              placeholder="Min, e.g. 5"
             />
+            <span className="shrink-0 text-xs text-zinc-500">to</span>
             <input
               required
               type="number"
               min={0}
+              step="any"
               value={salaryMax}
               onChange={(e) => setSalaryMax(e.target.value)}
               className="input"
-              placeholder="Max"
+              placeholder="Max, e.g. 10.5"
             />
+            <span className="shrink-0 text-xs font-medium text-zinc-600">LPA</span>
           </div>
           <p className="text-xs text-zinc-500 mt-1">
+            Lakhs per annum, decimals welcome — 5.5 to 11.3 means ₹5,50,000 to ₹11,30,000.
             Candidates whose expected salary is above the max are knocked out.
           </p>
         </Field>

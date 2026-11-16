@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BASE_URL, deleteJson, getJson, postJson } from "@/lib/api";
 import { getIntegrityScoreBand } from "@/lib/integrityLabel";
 import { getScoreLabel } from "@/lib/scoreLabel";
+import { lpaToRupees, rupeesToLpaInput } from "@/lib/salary";
 import { useDialog } from "@/components/Dialog";
 import L1AudioUploader from "@/components/L1AudioUploader";
 import type { Bucket, Candidate, InterviewSession } from "@/lib/types";
@@ -652,8 +653,10 @@ function ScreeningDetailsForm({
   const [noticePeriod, setNoticePeriod] = useState(
     candidate.notice_period_days != null ? String(candidate.notice_period_days) : ""
   );
+  // LPA in the box, rupees on the wire — the same unit the job's band is entered in, so
+  // the knockout compares like with like.
   const [expectedSalary, setExpectedSalary] = useState(
-    candidate.expected_salary != null ? String(candidate.expected_salary) : ""
+    rupeesToLpaInput(candidate.expected_salary)
   );
 
   return (
@@ -669,15 +672,16 @@ function ScreeningDetailsForm({
       <input
         type="number"
         min={0}
+        step="any"
         value={expectedSalary}
         onChange={(e) => setExpectedSalary(e.target.value)}
-        placeholder="Expected salary"
+        placeholder="Expected salary (LPA)"
         className="text-xs border border-zinc-300 rounded px-2 py-0.5 flex-1"
       />
       <button
         type="button"
         onClick={() =>
-          onSubmit(noticePeriod ? Number(noticePeriod) : null, expectedSalary ? Number(expectedSalary) : null)
+          onSubmit(noticePeriod ? Number(noticePeriod) : null, lpaToRupees(expectedSalary))
         }
         className="btn-outline text-xs px-2 py-1"
       >

@@ -51,6 +51,19 @@ def _match_campus_branch(candidate_branch: str, allowed_branches: list[str]) -> 
     return False
 
 
+RUPEES_PER_LAKH = 100_000
+
+
+def _lpa(rupees: float) -> str:
+    """Rupees rendered back into the unit HR actually typed.
+
+    The band is entered in lakhs per annum and stored in rupees, so a reason quoting the
+    raw figure makes the reader convert it back in their head before they can compare it
+    to the number they set on the job.
+    """
+    return f"{rupees / RUPEES_PER_LAKH:.2f}".rstrip("0").rstrip(".") + " LPA"
+
+
 def check_knockout(profile: dict, job: Job) -> tuple[bool, list[str]]:
     reasons: list[str] = []
 
@@ -98,8 +111,8 @@ def check_knockout(profile: dict, job: Job) -> tuple[bool, list[str]]:
     if job.salary_band_max is not None and expected_salary is not None:
         if expected_salary > job.salary_band_max:
             reasons.append(
-                f"Expected salary {expected_salary} exceeds the role's budget of "
-                f"{job.salary_band_max}"
+                f"Expected salary {_lpa(expected_salary)} exceeds the role's budget of "
+                f"{_lpa(job.salary_band_max)}"
             )
 
     return (len(reasons) > 0, reasons)
