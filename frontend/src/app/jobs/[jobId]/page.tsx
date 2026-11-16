@@ -1,7 +1,13 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import Link from "next/link";
 import { deleteJson, getJson, patchJson, postForm, postJson } from "@/lib/api";
 import { getScoreLabel } from "@/lib/scoreLabel";
@@ -22,6 +28,25 @@ const BUCKET_COLORS: Record<Bucket, string> = {
   declined: "bucket-declined",
 };
 
+// What the backend can actually read (services/text_extract.py reads .pdf and .docx, and
+// nothing else). The file picker enforces this through its `accept` attribute, but a drop
+// bypasses `accept` entirely — so dropped files are filtered against the same list here.
+// Without it a .doc or a screenshot reaches the server and comes back as a card in the
+// "failed to process" panel, far from the moment the mistake was made.
+const ACCEPTED_RESUME_EXTENSIONS = [".pdf", ".docx"];
+
+function isAcceptedResume(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return ACCEPTED_RESUME_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+/** Identity for de-duping a selection. Dropping the same batch twice is an easy slip, and
+ * each copy would otherwise upload and score separately — then show up as a duplicate the
+ * reviewer has to deal with. */
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
 export default function JobDetailPage() {
   const { confirm, prompt, notify } = useDialog();
   const { jobId } = useParams<{ jobId: string }>();
@@ -34,6 +59,13 @@ export default function JobDetailPage() {
   const [editing, setEditing] = useState(false);
   const [isCampusBulkOpen, setIsCampusBulkOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [rejectedCount, setRejectedCount] = useState(0);
+  // dragenter/dragleave also fire as the pointer crosses child elements, so a plain
+  // boolean makes the highlight flicker whenever the cursor passes over the text inside
+  // the zone. Counting enters against leaves is what actually tracks "still inside".
+  const dragDepth = useRef(0);
 
   const refresh = useCallback(() => {
     getJson<Job>(`/jobs/${jobId}`)
@@ -48,18 +80,66 @@ export default function JobDetailPage() {
     refresh();
   }, [refresh]);
 
+  // A file dropped anywhere other than the zone would otherwise be opened by the browser,
+  // navigating away from a page that may have a batch staged on it. Swallowing the default
+  // outside the zone makes a near miss do nothing instead.
+  useEffect(() => {
+    const swallow = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", swallow);
+    window.addEventListener("drop", swallow);
+    return () => {
+      window.removeEventListener("dragover", swallow);
+      window.removeEventListener("drop", swallow);
+    };
+  }, []);
+
+  const addFiles = useCallback((incoming: FileList | null) => {
+    if (!incoming || incoming.length === 0) return;
+    const picked = Array.from(incoming);
+    const accepted = picked.filter(isAcceptedResume);
+    setRejectedCount(picked.length - accepted.length);
+    setSelectedFiles((current) => {
+      const seen = new Set(current.map(fileKey));
+      return [...current, ...accepted.filter((f) => !seen.has(fileKey(f)))];
+    });
+  }, []);
+
+  function clearSelection() {
+    setSelectedFiles([]);
+    setRejectedCount(0);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleDragEnter(e: ReactDragEvent<HTMLElement>) {
+    e.preventDefault();
+    dragDepth.current += 1;
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(e: ReactDragEvent<HTMLElement>) {
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setIsDragging(false);
+  }
+
+  function handleDrop(e: ReactDragEvent<HTMLElement>) {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setIsDragging(false);
+    addFiles(e.dataTransfer.files);
+  }
+
   async function handleUpload() {
-    const files = fileInputRef.current?.files;
-    if (!files || files.length === 0) return;
+    if (selectedFiles.length === 0) return;
 
     const form = new FormData();
-    Array.from(files).forEach((f) => form.append("files", f));
+    selectedFiles.forEach((f) => form.append("files", f));
     if (uploadSource.trim()) form.append("source", uploadSource.trim());
 
     setUploading(true);
     try {
       const uploaded = await postForm<Candidate[]>(`/jobs/${jobId}/resumes`, form);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      clearSelection();
       refresh();
 
       // Duplicates are skipped rather than scored, and they land in a collapsed list
@@ -190,27 +270,127 @@ export default function JobDetailPage() {
         </div>
       )}
 
-      <div className="border border-zinc-200 rounded-md p-4 flex items-center justify-between gap-3 flex-wrap bg-zinc-50/50">
-        <div className="flex items-center gap-3 flex-wrap">
-          <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx" />
-          <input
-            value={uploadSource}
-            onChange={(e) => setUploadSource(e.target.value)}
-            placeholder="Source (optional): referral, LinkedIn…"
-            className="input w-56 bg-white"
-          />
-          <button onClick={handleUpload} disabled={uploading} className="btn-primary">
-            {uploading ? "Processing…" : "Upload resumes"}
+      <div className="border border-zinc-200 rounded-md p-4 space-y-3 bg-zinc-50/50">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap">
+            {/* The real input still does the picking; the zone below is its trigger and
+              * its drop target. tabIndex -1 keeps this out of the tab order, since an
+              * invisible focus stop reads as the focus ring vanishing — the button is the
+              * keyboard path to the same dialog. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.docx"
+              tabIndex={-1}
+              className="sr-only"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                // Clearing it lets the same file be picked again after being removed from
+                // the list: left as-is the input still holds it, and choosing it a second
+                // time fires no change event at all.
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDrop={handleDrop}
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onDragOver={(e) => {
+                // Without preventDefault here the element is not a valid drop target and
+                // the drop never fires at all.
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              className={`flex min-w-[19rem] flex-col items-center justify-center rounded-md border-2 border-dashed px-4 py-2.5 text-center transition-colors ${
+                isDragging
+                  ? "border-blue-500 bg-blue-50 text-blue-900"
+                  : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+              }`}
+            >
+              <span className="text-sm font-medium">
+                {isDragging ? "Drop to add them" : "Drag & drop resumes here"}
+              </span>
+              <span className="mt-0.5 text-xs text-zinc-500">
+                or click to browse — PDF or DOCX
+              </span>
+            </button>
+            <input
+              value={uploadSource}
+              onChange={(e) => setUploadSource(e.target.value)}
+              placeholder="Source (optional): referral, LinkedIn…"
+              className="input w-56 bg-white"
+            />
+            <button
+              onClick={handleUpload}
+              disabled={uploading || selectedFiles.length === 0}
+              className="btn-primary disabled:opacity-40"
+            >
+              {uploading
+                ? "Processing…"
+                : selectedFiles.length > 0
+                  ? `Upload ${selectedFiles.length} resume${selectedFiles.length === 1 ? "" : "s"}`
+                  : "Upload resumes"}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsCampusBulkOpen(true)}
+            className="btn-outline border-indigo-300 text-indigo-800 bg-indigo-50/60 hover:bg-indigo-100 flex items-center gap-1.5 text-xs font-semibold px-3 py-2"
+          >
+            🎓 Campus Bulk Drive Screening
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setIsCampusBulkOpen(true)}
-          className="btn-outline border-indigo-300 text-indigo-800 bg-indigo-50/60 hover:bg-indigo-100 flex items-center gap-1.5 text-xs font-semibold px-3 py-2"
-        >
-          🎓 Campus Bulk Drive Screening
-        </button>
+        {rejectedCount > 0 && (
+          <p className="text-xs text-amber-700">
+            {rejectedCount} file{rejectedCount === 1 ? " was" : "s were"} left out — only
+            PDF and DOCX can be read.
+          </p>
+        )}
+
+        {selectedFiles.length > 0 && (
+          <div className="rounded-md border border-zinc-200 bg-white p-2">
+            <div className="flex items-center justify-between px-1 pb-1.5">
+              <span className="text-xs font-semibold text-zinc-700">
+                {selectedFiles.length} file{selectedFiles.length === 1 ? "" : "s"} ready to
+                upload
+              </span>
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-xs text-zinc-500 underline hover:text-red-600"
+              >
+                Clear all
+              </button>
+            </div>
+            <ul className="max-h-32 space-y-0.5 overflow-y-auto">
+              {selectedFiles.map((file) => (
+                <li
+                  key={fileKey(file)}
+                  className="flex items-center justify-between gap-2 rounded px-1 py-0.5 text-xs hover:bg-zinc-50"
+                >
+                  <span className="truncate text-zinc-700">{file.name}</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedFiles((current) =>
+                        current.filter((f) => fileKey(f) !== fileKey(file))
+                      )
+                    }
+                    className="shrink-0 text-zinc-400 hover:text-red-600"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <CampusBulkUploader
