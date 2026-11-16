@@ -396,6 +396,21 @@ docker compose up -d
 > `### YYYY-MM-DD — <title>` then what / why / files / verification.
 > Keep entries atomic; add one whenever code, schema, infra, config, or deployment changes.
 
+### 2026-11-16 — TYH-007: Drag-and-drop for the resume upload section (enhancement)
+- **What:** The resume upload box on the Job-details page (`jobs/[jobId]`) is now a drag-and-drop
+  zone. HR can drop PDF/DOCX files onto it or click it to browse; chosen files show as removable
+  chips with a "Clear all", and the Upload button shows the count ("Upload 3 resumes").
+- **Why:** TYH-007 suggestion — the old bare `<input type="file">` had no drop target.
+- **How:** Selected files are held in `selectedFiles` state (fed by both the picker and drop),
+  filtered to `.pdf`/`.docx`, de-duped by name+size; a drag-depth ref keeps the highlight stable
+  across child elements. `handleUpload` now reads from state and gained proper error handling —
+  success/error **toasts** (previously it had none), consistent with the project-wide error
+  standard. The hidden file input + backend `/jobs/{id}/resumes` contract are unchanged.
+- **Files:** `frontend/src/app/jobs/[jobId]/page.tsx` (DnD state/handlers, drop-zone UI, toasts;
+  `ApiError` + `toast` imports).
+- **Verification:** `tsc --noEmit` 0, eslint clean on the file; frontend restarted. Pending HR
+  manual test: drag resumes onto the box + click-to-browse both populate and upload.
+
 ### 2026-11-16 — TYH-004: Score not shown after overriding a rejected candidate to approved
 - **What:** When HR overrides a candidate to **approved/review**, the backend now computes the
   AI fit score on the spot if the candidate was never scored.
