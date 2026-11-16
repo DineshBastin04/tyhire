@@ -399,8 +399,9 @@ export default function JobForm({
         <p className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
           Skill Relevancy & Categorization
         </p>
-        <Field label="Required Skills (primary list, comma-separated)">
+        <Field label="Required Skills (primary list, comma-separated)" required>
           <input
+            required
             value={requiredSkills}
             onChange={(e) => setRequiredSkills(e.target.value)}
             className="input bg-white"
@@ -408,16 +409,18 @@ export default function JobForm({
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Core / Mandatory Skills">
+          <Field label="Core / Mandatory Skills" required>
             <input
+              required
               value={coreSkills}
               onChange={(e) => setCoreSkills(e.target.value)}
               className="input bg-white text-xs"
               placeholder="FastAPI, Docker, SQL"
             />
           </Field>
-          <Field label="Secondary / Good-to-have Skills">
+          <Field label="Secondary / Good-to-have Skills" required>
             <input
+              required
               value={secondarySkills}
               onChange={(e) => setSecondarySkills(e.target.value)}
               className="input bg-white text-xs"
@@ -436,8 +439,13 @@ export default function JobForm({
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label="Level">
-          <select value={level} onChange={(e) => setLevel(e.target.value as JobLevel)} className="input">
+        <Field label="Level" required>
+          <select
+            required
+            value={level}
+            onChange={(e) => setLevel(e.target.value as JobLevel)}
+            className="input"
+          >
             <option value="experienced">Experienced</option>
             <option value="fresher">Fresher / entry-level</option>
           </select>
@@ -445,8 +453,9 @@ export default function JobForm({
             Freshers are scored on education, projects and internships instead of work history.
           </p>
         </Field>
-        <Field label="Work mode">
+        <Field label="Work mode" required>
           <select
+            required
             value={workMode}
             onChange={(e) => setWorkMode(e.target.value as WorkMode)}
             className="input"
@@ -462,14 +471,15 @@ export default function JobForm({
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label="Min years experience (eligibility requirement)">
+        <Field label="Min years experience (eligibility requirement)" required>
           <input
+            required
             type="number"
             min={0}
             value={minYears}
             onChange={(e) => setMinYears(e.target.value)}
             className="input"
-            placeholder="Leave blank to skip"
+            placeholder="0 if there is no minimum"
           />
         </Field>
         <Field label="Allowed locations (eligibility requirement)">
@@ -480,19 +490,21 @@ export default function JobForm({
             placeholder="Bangalore, Chennai"
           />
         </Field>
-        <Field label="Max notice period, days (eligibility requirement)">
+        <Field label="Max notice period, days (eligibility requirement)" required>
           <input
+            required
             type="number"
             min={0}
             value={maxNoticeDays}
             onChange={(e) => setMaxNoticeDays(e.target.value)}
             className="input"
-            placeholder="Leave blank to skip"
+            placeholder="e.g. 90"
           />
         </Field>
-        <Field label="Salary band (eligibility requirement on max)">
+        <Field label="Salary band (eligibility requirement on max)" required>
           <div className="flex gap-2">
             <input
+              required
               type="number"
               min={0}
               value={salaryMin}
@@ -501,6 +513,7 @@ export default function JobForm({
               placeholder="Min"
             />
             <input
+              required
               type="number"
               min={0}
               value={salaryMax}
