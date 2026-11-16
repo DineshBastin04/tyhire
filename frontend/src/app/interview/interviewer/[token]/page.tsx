@@ -362,6 +362,12 @@ export default function InterviewerCapturePage() {
   }
 
   function handleCloseTab() {
+    // A tab opened from a copied interviewer link is not "script-closable", so browsers
+    // (Chrome in particular) silently refuse window.close() for security — only a tab that
+    // JS opened via window.open() can be closed this way. Attempt it anyway (it works when the
+    // tab was script-opened); if we're still here a moment later, switch to a clean "all done"
+    // confirmation instead of leaving what looks like an error. The teardown that matters
+    // (camera/mic/screen-share) already happened when the call ended.
     window.close();
     setTimeout(() => setCloseFailed(true), 300);
   }
@@ -1134,9 +1140,12 @@ export default function InterviewerCapturePage() {
                   Close
                 </button>
                 {closeFailed ? (
-                  <p className="text-xs text-zinc-500 max-w-[220px] text-right">
-                    Can&apos;t close this automatically — go ahead and close the tab yourself.
-                  </p>
+                  <div className="flex items-center gap-1.5 text-emerald-700 max-w-[260px] text-right">
+                    <span className="text-sm leading-none">✓</span>
+                    <p className="text-xs font-semibold">
+                      All done — this evaluation is saved. You can safely close this tab now.
+                    </p>
+                  </div>
                 ) : (
                   <button
                     onClick={handleCloseTab}

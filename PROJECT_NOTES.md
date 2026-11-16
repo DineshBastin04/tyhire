@@ -396,6 +396,23 @@ docker compose up -d
 > `### YYYY-MM-DD — <title>` then what / why / files / verification.
 > Keep entries atomic; add one whenever code, schema, infra, config, or deployment changes.
 
+### 2026-11-16 — Ad-hoc: "Finish & Close Tab" showed a failure message on the scorecard
+- **What:** On the interviewer Consolidated Evaluation Scorecard, clicking **Finish & Close
+  Tab** left a greyed "Can't close this automatically — go ahead and close the tab yourself"
+  message that read like an error. Replaced it with a clean success confirmation:
+  "✓ All done — this evaluation is saved. You can safely close this tab now."
+- **Why (not a code bug):** `window.close()` is only permitted on a *script-opened* tab
+  (opened via `window.open()`). The interviewer reaches this page from a **copied link** — a
+  directly-navigated tab — which browsers (Chrome especially) refuse to let any site close, by
+  security design. So auto-close cannot be forced; the old message framed that normal, expected
+  manual step as a failure. The button still attempts the close (works when the tab *was*
+  script-opened) and only falls back to the confirmation when it can't.
+- **Files:** `frontend/src/app/interview/interviewer/[token]/page.tsx` (`handleCloseTab`
+  comment, footer success state). The candidate end screen (`interview/[token]/page.tsx`) has
+  the same browser limitation but a non-alarming message; left as-is.
+- **Verification:** `tsc --noEmit` 0; no new eslint issues (pre-existing call-timer lint on this
+  file untouched); frontend restarted. Pending manual test.
+
 ### 2026-11-16 — TYH-007: Drag-and-drop for the resume upload section (enhancement)
 - **What:** The resume upload box on the Job-details page (`jobs/[jobId]`) is now a drag-and-drop
   zone. HR can drop PDF/DOCX files onto it or click it to browse; chosen files show as removable
